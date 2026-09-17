@@ -34,6 +34,7 @@ required=(
   tools/codex-runner/self-test.sh
   tools/codex-runner/tests/test_runtime.py
   tools/codex-runner/tests/test_hardening.py
+  tools/codex-runner/tests/test_contract.py
 )
 
 for path in "${required[@]}"; do
@@ -61,6 +62,8 @@ grep -q "REVIEW_ERROR" docs/REVIEW_PROTOCOL.md
 grep -q "Maximum formal product repair rounds: 2" docs/REPAIR_PROTOCOL.md
 grep -q "explicit user approval" skills/release-gate/SKILL.md
 grep -q "Do not ask the user to relay prompts" tools/codex-runner/runner.py
+grep -q "EXPLICIT INPUT REFS" tools/codex-runner/entrypoint.py
+grep -q 'data\["PR"\]' tools/codex-runner/entrypoint.py
 
 bash -n tools/codex-runner/ai-dev
 bash -n tools/codex-runner/install.sh
