@@ -34,7 +34,7 @@ This file stores stable facts, checkpoints, architecture decisions, known limita
 
 - v1 defines Runner behavior but does not yet implement automatic model invocation.
 - A product repository must replace/extend the framework-only `ci/ai-verify.sh` with real product validation before treating CI as a product release/review gate.
-- GitHub labels and repository template mode may require one-time repository configuration outside repo content.
+- GitHub platform setup is not fully represented by files: `main` protection/ruleset, required status checks, label definitions, and Template repository mode must be configured once per repo. See `docs/REPOSITORY_SETUP.md`.
 
 ## Deferred
 
@@ -45,7 +45,7 @@ This file stores stable facts, checkpoints, architecture decisions, known limita
 
 ## Next Recommended Step
 
-Use this framework on one real product Issue end-to-end. Capture friction before implementing Runner automation.
+Complete `docs/REPOSITORY_SETUP.md`, then use this framework on one real product Issue end-to-end. Capture friction before implementing Runner automation.
 
 ## Review Status
 
