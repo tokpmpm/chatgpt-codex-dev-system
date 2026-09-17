@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -11,22 +12,119 @@ from typing import Any
 import runner as core
 
 
+OLD_DEVELOPER_DEFAULT = [
+    "codex", "exec", "--sandbox", "workspace-write", "--ask-for-approval", "never", "--json", "--ephemeral"
+]
+OLD_REVIEWER_DEFAULT = [
+    "codex", "exec", "--sandbox", "workspace-write", "--ask-for-approval", "never", "--json", "--ephemeral"
+]
+CURRENT_DEVELOPER_DEFAULT = [
+    "codex", "--ask-for-approval", "never", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral"
+]
+CURRENT_READ_ONLY_DEFAULT = [
+    "codex", "--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--json", "--ephemeral"
+]
+
+
+def normalize_adapter_defaults(config: core.Config) -> core.Config:
+    """Keep direct entrypoint use safe even when core fallback defaults lag a CLI release."""
+    if config.developer_command == OLD_DEVELOPER_DEFAULT:
+        config.developer_command = list(CURRENT_DEVELOPER_DEFAULT)
+    if config.reviewer_command == OLD_REVIEWER_DEFAULT:
+        config.reviewer_command = list(CURRENT_READ_ONLY_DEFAULT)
+    if config.planner_command == OLD_REVIEWER_DEFAULT:
+        config.planner_command = list(CURRENT_READ_ONLY_DEFAULT)
+    return config
+
+
+def guard_expected_repo(actual_repo: str) -> None:
+    expected = os.getenv("AI_DEV_EXPECTED_REPO", "").strip()
+    if expected and actual_repo.lower() != expected.lower():
+        raise core.GuardError(
+            f"wrong repository: expected {expected}, got {actual_repo}; refusing model call"
+        )
+
+
+class HardenedPromptBuilder(core.PromptBuilder):
+    """Make repository/branch/base/exact-SHA inputs explicit in every generated prompt."""
+
+    def __init__(self, root: Path, repo: core.Repo, config: core.Config):
+        super().__init__(root)
+        self.repo = repo
+        self.config = config
+
+    def _refs(self, sha: str) -> str:
+        branch = self.repo.branch()
+        base_sha = self.repo.merge_base(self.config.base_branch, sha)
+        return (
+            "\nEXPLICIT INPUT REFS:\n"
+            f"REPOSITORY: {self.repo.remote_repo()}\n"
+            f"BRANCH: {branch}\n"
+            f"BASE_BRANCH: {self.config.base_branch}\n"
+            f"BASE_SHA: {base_sha}\n"
+            f"INPUT_SHA: {sha}\n"
+        )
+
+    def developer(self, issue: dict[str, Any], sha: str) -> str:
+        return self._refs(sha) + "\n" + super().developer(issue, sha)
+
+    def reviewer(
+        self,
+        issue: dict[str, Any],
+        sha: str,
+        diff: str,
+        ci_evidence: str,
+        repair_plan: str = "",
+        previous_review: str = "",
+    ) -> str:
+        return self._refs(sha) + "\n" + super().reviewer(
+            issue, sha, diff, ci_evidence, repair_plan, previous_review
+        )
+
+    def planner(self, issue: dict[str, Any], sha: str, review_text: str, next_round: int) -> str:
+        return self._refs(sha) + "\n" + super().planner(issue, sha, review_text, next_round)
+
+    def repair(self, issue: dict[str, Any], sha: str, plan: str, round_no: int) -> str:
+        return self._refs(sha) + "\n" + super().repair(issue, sha, plan, round_no)
+
+
 class StrictRunLedger(core.RunLedger):
-    """Require a durable GitHub audit confirmation for every recorded model call."""
+    """Require durable GitHub audit confirmation for every model execution."""
+
+    def _current_pr_number(self) -> str:
+        try:
+            branch = self.repo.branch()
+            raw = self.github._gh(
+                "pr", "list",
+                "--repo", self.github.repo_full_name,
+                "--head", branch,
+                "--state", "open",
+                "--json", "number",
+                "--limit", "1",
+            )
+            rows = json.loads(raw or "[]")
+            if rows:
+                return str(rows[0]["number"])
+        except Exception:
+            pass
+        return "N/A"
 
     def record(self, **kwargs):
         run_id = super().record(**kwargs)
         record_path = self.dir / f"{run_id}.json"
         data = json.loads(record_path.read_text(encoding="utf-8"))
+        data["PR"] = self._current_pr_number()
+        data["BRANCH"] = self.repo.branch()
+        record_path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
         body = "AI_DEV_AUDIT_CONFIRMED\n" + "\n".join(f"{k}: {v}" for k, v in data.items())
-        # Unlike the core best-effort comment, this confirmation is required.
+        # Unlike the core best-effort marker, this durable confirmation is required.
         # If GitHub evidence cannot be written, fail closed before advancing workflow state.
         self.github.comment(int(data["ISSUE"]), body)
         return run_id
 
 
 class HardenedWorkflowEngine(core.WorkflowEngine):
-    """Adds guards that must hold before any planner/reviewer model call."""
+    """Adds guards that must hold before planner/reviewer model calls."""
 
     def review(
         self,
@@ -66,15 +164,17 @@ class HardenedWorkflowEngine(core.WorkflowEngine):
             raise core.GuardError("review-only recovery requires prior REVIEW_ERROR for the same SHA")
         if self.github.ci_status(sha, self.config.ci_check_name) != "PASS":
             raise core.GuardError("review-only recovery requires existing exact-SHA CI PASS")
-        # Recovery itself gets one provider-error retry, still on the same immutable product SHA.
+        # Recovery gets at most one fresh provider-error retry, still on the same product SHA.
         return self.review(issue_no, sha, allow_retry=True)
 
 
 def build_engine(root: Path) -> tuple[HardenedWorkflowEngine, core.Repo, core.GitHubCLI, core.Config]:
     repo = core.Repo(root)
-    config = core.Config.load(repo.root)
-    gh = core.GitHubCLI(repo.remote_repo(), repo.root, repo.shell)
-    prompts = core.PromptBuilder(repo.root)
+    actual_repo = repo.remote_repo()
+    guard_expected_repo(actual_repo)
+    config = normalize_adapter_defaults(core.Config.load(repo.root))
+    gh = core.GitHubCLI(actual_repo, repo.root, repo.shell)
+    prompts = HardenedPromptBuilder(repo.root, repo, config)
     developer = core.CommandModelAdapter(
         config.developer_command, config.developer_provider, config.developer_model, repo.shell
     )
@@ -147,10 +247,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "self-test":
         return _self_test()
 
-    engine, repo, gh, config = build_engine(Path.cwd())
-    issue = getattr(args, "issue", None) or core.parse_issue_from_branch(repo.branch())
-
     try:
+        engine, repo, gh, config = build_engine(Path.cwd())
+        issue = getattr(args, "issue", None) or core.parse_issue_from_branch(repo.branch())
+
         if args.cmd == "status":
             sha = repo.head()
             branch = repo.branch()
