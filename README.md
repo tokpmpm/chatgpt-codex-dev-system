@@ -1,14 +1,25 @@
-# ChatGPT × GitHub × Codex App — AI Development System
+# ChatGPT × GitHub × Codex — AI Development System
 
-A reusable workflow for website, Web App, and tool projects where GitHub is the long-term source of truth.
+A reusable workflow for website, Web App, and tool projects where GitHub is the long-term source of truth and the Runner automates prompt generation, Codex execution, CI gating, and Independent Review.
 
 ## Roles
 
-- **ChatGPT** — product planning, architecture, Acceptance Criteria, issue planning, repair plans, review coordination, acceptance, next-step decisions.
-- **Codex App** — implementation, tests, bug fixes, regression, local validation, and execution of an approved plan.
+- **ChatGPT** — product planning, architecture, Acceptance Criteria, issue planning, repair plans, acceptance, and next-step decisions.
+- **Runner** — reads approved GitHub/repo state, generates prompts automatically, invokes Codex and the Independent Reviewer, applies workflow guards, and records evidence.
+- **Codex** — implementation, tests, bug fixes, regression, local validation, and execution of the approved Issue/Repair Plan through the Runner.
 - **GitHub** — Issues, PRs, commits, CI evidence, review evidence, workflow state, and durable handoff state.
-- **Independent Reviewer** — isolated read-only review against Acceptance Criteria; returns `APPROVE`, `REQUEST_CHANGES`, or `REVIEW_ERROR`.
-- **User** — product direction and explicit approval for exceptional repair, merge, and production deploy.
+- **Independent Reviewer** — fresh isolated read-only review against Acceptance Criteria; returns `APPROVE`, `REQUEST_CHANGES`, or `REVIEW_ERROR`.
+- **User** — product direction and explicit approval for Repair Plans that require approval, exceptional repair, merge, and production deploy.
+
+## Target user experience
+
+The end state is not manual prompt copy/paste. A normal run should be close to:
+
+```text
+ai-dev start --issue 12
+```
+
+The Runner automatically builds the Developer prompt from the Issue, Acceptance Criteria, repo state, and exact SHA, invokes Codex, validates the result, pushes the candidate, waits for/checks exact-SHA CI, builds the Reviewer prompt, and invokes a fresh isolated Reviewer.
 
 ## Start here
 
@@ -27,15 +38,17 @@ Then verify branch, HEAD SHA, working tree, and current GitHub CI/review status 
 ```text
 Product request
   → GitHub Issue + verifiable Acceptance Criteria
-  → Codex implementation
+  → Runner auto-generates Developer prompt
+  → Runner invokes Codex
   → targeted tests + real-flow validation + negative cases
   → full regression
   → commit + push feature branch
   → exact-SHA CI PASS
+  → Runner auto-generates Reviewer prompt
   → isolated Independent Review
       → APPROVE → user-approved merge/deploy
-      → REQUEST_CHANGES → ChatGPT Repair Plan → user approval → Codex repair → Delta Review
-      → REVIEW_ERROR → same-SHA review retry/recovery; no product repair
+      → REQUEST_CHANGES → ChatGPT Repair Plan → user approval → Runner auto-generates repair prompt → Codex repair → Delta Review
+      → REVIEW_ERROR → same-SHA reviewer retry/recovery; no product repair
 ```
 
 Medium/high-risk work uses `docs/ONE_SHOT_DELIVERY_PROTOCOL.md`. Formal product repair is capped at two rounds unless the user explicitly authorizes a separately recorded exceptional repair.
@@ -46,9 +59,9 @@ Copy the framework files into the product repository, keep product code outside 
 
 Complete the one-time GitHub platform setup in `docs/REPOSITORY_SETUP.md`: protect `main`, require the exact-SHA validation check, create the workflow labels, and enable Template repository mode when this repo is used as a template source.
 
-## What v1 intentionally does not automate
+## Runner status
 
-v1 does not automatically invoke Codex or a reviewer model, merge, deploy, or mutate production. `tools/codex-runner/README.md` defines the runner contract for a later implementation with SHA/branch/dirty-tree guards, reviewer isolation, retry semantics, repair-round tracking, deterministic fixture tests, and transactional install/rollback.
+The workflow contracts and CI gate exist today. The executable Runner is the next implementation milestone. Its contract is in `tools/codex-runner/README.md` and now explicitly requires automatic prompt generation and non-interactive Codex/Reviewer invocation. Users should not need to paste prompts or operate Codex CLI manually.
 
 ## Directory map
 
@@ -56,8 +69,8 @@ v1 does not automatically invoke Codex or a reviewer model, merge, deploy, or mu
 AGENTS.md
 docs/                  Durable workflow, project state, and repo setup
 skills/                Reusable agent procedures
-templates/             Copy-ready Issue/review/repair artifacts
-tools/codex-runner/     Runner architecture contract
+templates/             Issue/review/repair structures used by ChatGPT/Runner
+tools/codex-runner/     Automated Runner contract
 .github/workflows/      CI gate
 ```
 
