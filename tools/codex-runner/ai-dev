@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  TARGET="$(readlink "$SOURCE")"
+  if [[ "$TARGET" == /* ]]; then
+    SOURCE="$TARGET"
+  else
+    SOURCE="$SOURCE_DIR/$TARGET"
+  fi
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# Codex CLI treats --ask-for-approval as a global option in current releases,
+# so keep it before the exec subcommand. Users may override any adapter command.
+: "${AI_DEV_DEVELOPER_CMD:=codex --ask-for-approval never exec --sandbox workspace-write --json --ephemeral}"
+: "${AI_DEV_REVIEWER_CMD:=codex --ask-for-approval never exec --sandbox read-only --json --ephemeral}"
+: "${AI_DEV_PLANNER_CMD:=codex --ask-for-approval never exec --sandbox read-only --json --ephemeral}"
+export AI_DEV_DEVELOPER_CMD AI_DEV_REVIEWER_CMD AI_DEV_PLANNER_CMD
+
+exec python3 "$DIR/entrypoint.py" "$@"

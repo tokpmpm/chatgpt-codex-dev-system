@@ -1,0 +1,20 @@
+{
+  "git": {"base_branch": "main"},
+  "ci": {"check_name": "Exact SHA validation", "poll_seconds": 10, "timeout_seconds": 600},
+  "repair": {"max_rounds": 2},
+  "developer": {
+    "command": ["codex", "--ask-for-approval", "never", "exec", "--sandbox", "workspace-write", "--json", "--ephemeral"],
+    "provider": "codex-cli",
+    "model": "configured-by-codex"
+  },
+  "reviewer": {
+    "command": ["codex", "--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--json", "--ephemeral"],
+    "provider": "codex-cli",
+    "model": "configured-by-codex"
+  },
+  "planner": {
+    "command": ["codex", "--ask-for-approval", "never", "exec", "--sandbox", "read-only", "--json", "--ephemeral"],
+    "provider": "codex-cli",
+    "model": "configured-by-codex"
+  }
+}
