@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -88,26 +89,71 @@ class HardenedPromptBuilder(core.PromptBuilder):
         return self._refs(sha) + "\n" + super().repair(issue, sha, plan, round_no)
 
 
+class GuardedDeveloperAdapter:
+    """Developer may edit files, but Runner exclusively owns branch/commit/push transitions."""
+
+    def __init__(self, delegate: core.CommandModelAdapter, repo: core.Repo):
+        self.delegate = delegate
+        self.repo = repo
+        self.provider = delegate.provider
+        self.model = delegate.model
+
+    def run(self, prompt: str, cwd: Path, timeout: int = 3600) -> core.ModelResult:
+        before_branch = self.repo.branch()
+        before_sha = self.repo.head()
+        result = self.delegate.run(prompt, cwd, timeout=timeout)
+        after_branch = self.repo.branch()
+        after_sha = self.repo.head()
+        if after_branch != before_branch or after_sha != before_sha:
+            return core.ModelResult(
+                False,
+                result.text,
+                result.exit_code or 1,
+                "developer changed branch/HEAD; Runner exclusively owns git delivery",
+            )
+        return result
+
+
+class ValidatingPlannerAdapter:
+    """A Repair Plan is invalid unless all required sections are present."""
+
+    REQUIRED = ("ROOT_CAUSE:", "CHANGES:", "DO_NOT_CHANGE:", "VALIDATION:")
+
+    def __init__(self, delegate: core.CommandModelAdapter):
+        self.delegate = delegate
+        self.provider = delegate.provider
+        self.model = delegate.model
+
+    def run(self, prompt: str, cwd: Path, timeout: int = 3600) -> core.ModelResult:
+        result = self.delegate.run(prompt, cwd, timeout=timeout)
+        if not result.ok:
+            return result
+        missing = [name for name in self.REQUIRED if name not in result.text]
+        if missing:
+            return core.ModelResult(
+                False,
+                result.text,
+                1,
+                f"malformed Repair Plan; missing sections: {', '.join(missing)}",
+            )
+        return result
+
+
 class StrictRunLedger(core.RunLedger):
     """Require durable GitHub audit confirmation for every model execution."""
 
     def _current_pr_number(self) -> str:
-        try:
-            branch = self.repo.branch()
-            raw = self.github._gh(
-                "pr", "list",
-                "--repo", self.github.repo_full_name,
-                "--head", branch,
-                "--state", "open",
-                "--json", "number",
-                "--limit", "1",
-            )
-            rows = json.loads(raw or "[]")
-            if rows:
-                return str(rows[0]["number"])
-        except Exception:
-            pass
-        return "N/A"
+        branch = self.repo.branch()
+        raw = self.github._gh(
+            "pr", "list",
+            "--repo", self.github.repo_full_name,
+            "--head", branch,
+            "--state", "open",
+            "--json", "number",
+            "--limit", "1",
+        )
+        rows = json.loads(raw or "[]")
+        return str(rows[0]["number"]) if rows else "N/A"
 
     def record(self, **kwargs):
         run_id = super().record(**kwargs)
@@ -124,7 +170,32 @@ class StrictRunLedger(core.RunLedger):
 
 
 class HardenedWorkflowEngine(core.WorkflowEngine):
-    """Adds guards that must hold before planner/reviewer model calls."""
+    """Adds strict contracts and guards around planner/reviewer transitions."""
+
+    def _review_parse(self, text: str) -> core.ReviewOutcome:
+        for marker in (
+            "REVIEW_MATRIX_BEGIN",
+            "REVIEW_MATRIX_END",
+            "REVIEW_RESULT_BEGIN",
+            "REVIEW_RESULT_END",
+        ):
+            if text.count(marker) != 1:
+                raise core.ProviderError(f"malformed reviewer output: expected exactly one {marker}")
+        result_block = text.split("REVIEW_RESULT_BEGIN", 1)[1].split("REVIEW_RESULT_END", 1)[0]
+        verdict_match = re.search(r"^VERDICT:\s*(APPROVE|REQUEST_CHANGES)\s*$", result_block, re.MULTILINE)
+        blocker_match = re.search(r"^BLOCKER_COUNT:\s*(\d+)\s*$", result_block, re.MULTILINE)
+        if not verdict_match or not blocker_match:
+            raise core.ProviderError("malformed reviewer result block")
+        verdict = verdict_match.group(1)
+        blockers = int(blocker_match.group(1))
+        if verdict == "APPROVE" and blockers != 0:
+            raise core.ProviderError("malformed reviewer output: APPROVE with nonzero blockers")
+        if verdict == "REQUEST_CHANGES" and blockers < 1:
+            raise core.ProviderError("malformed reviewer output: REQUEST_CHANGES without blockers")
+        matrix = text.split("REVIEW_MATRIX_BEGIN", 1)[1].split("REVIEW_MATRIX_END", 1)[0]
+        if "Requirement" not in matrix or "Status" not in matrix:
+            raise core.ProviderError("malformed reviewer matrix")
+        return core.ReviewOutcome(verdict, text, blockers)
 
     def review(
         self,
@@ -136,13 +207,19 @@ class HardenedWorkflowEngine(core.WorkflowEngine):
         allow_retry: bool = True,
     ) -> core.ReviewOutcome:
         self.repo.ensure_clean()
-        return super().review(
+        outcome = super().review(
             issue_no,
             sha,
             repair_plan=repair_plan,
             previous_review=previous_review,
             allow_retry=allow_retry,
         )
+        if outcome.verdict == "REVIEW_ERROR":
+            self.github.comment(
+                issue_no,
+                f"AI_DEV_REVIEW_ERROR\nINPUT_SHA: {sha}\nSTATUS: NEEDS_HUMAN_OR_EXPLICIT_RECOVERY",
+            )
+        return outcome
 
     def create_repair_plan(self, issue_no: int, sha: str, review_text: str) -> str:
         self.repo.ensure_clean()
@@ -175,15 +252,17 @@ def build_engine(root: Path) -> tuple[HardenedWorkflowEngine, core.Repo, core.Gi
     config = normalize_adapter_defaults(core.Config.load(repo.root))
     gh = core.GitHubCLI(actual_repo, repo.root, repo.shell)
     prompts = HardenedPromptBuilder(repo.root, repo, config)
-    developer = core.CommandModelAdapter(
+    developer_core = core.CommandModelAdapter(
         config.developer_command, config.developer_provider, config.developer_model, repo.shell
     )
     reviewer = core.CommandModelAdapter(
         config.reviewer_command, config.reviewer_provider, config.reviewer_model, repo.shell
     )
-    planner = core.CommandModelAdapter(
+    planner_core = core.CommandModelAdapter(
         config.planner_command, config.planner_provider, config.planner_model, repo.shell
     )
+    developer = GuardedDeveloperAdapter(developer_core, repo)
+    planner = ValidatingPlannerAdapter(planner_core)
     ledger = StrictRunLedger(repo, gh)
     return HardenedWorkflowEngine(
         repo, gh, prompts, developer, reviewer, planner, config, ledger
