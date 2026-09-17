@@ -1,0 +1,16 @@
+version: 1
+
+runner:
+  developer_adapter: codex
+  reviewer_adapter: independent
+  max_repair_rounds: 2
+  reviewer_retry_on_error: 1
+
+prompts:
+  automatic: true
+  record_prompt_hash: true
+  require_exact_input_sha: true
+
+release:
+  require_user_approval_for_merge: true
+  require_user_approval_for_deploy: true
