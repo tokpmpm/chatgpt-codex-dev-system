@@ -10,11 +10,11 @@ This file stores stable facts, checkpoints, architecture decisions, known limita
 
 ## Current Development
 
-- Target version: `v1.0.0`
-- Feature branch: bootstrap completed on `main`; future changes use feature/chore branches
-- Latest product checkpoint SHA: `43f400bd2e5e93ea4e395fc08fec129540188134`
-- Current Issue: framework bootstrap completed without a pre-existing Issue
-- Current milestone: reusable workflow v1 pilot-ready
+- Target version: `v1.1.0`
+- Feature branch: next implementation must use a dedicated feature branch
+- Latest validated framework checkpoint SHA: `43f400bd2e5e93ea4e395fc08fec129540188134`
+- Current Issue: `#1 Implement executable automated Runner with zero manual prompt relay`
+- Current milestone: automated Runner + public-shareable workflow
 
 ## Validated Scope
 
@@ -29,28 +29,27 @@ This file stores stable facts, checkpoints, architecture decisions, known limita
 - session handoff contract
 - release gate requiring explicit user approval
 - framework contract validation workflow executes successfully at the v1 checkpoint
+- automatic prompt generation is now a required Runner design principle; manual prompt relay is fallback/debug only
 
 ## Known Risks
 
-- v1 defines Runner behavior but does not yet implement automatic model invocation.
+- The executable Runner is not implemented yet; automatic prompt generation/model invocation is currently a documented contract and Issue #1 acceptance target.
 - A product repository must replace/extend the framework-only `ci/ai-verify.sh` with real product validation before treating CI as a product release/review gate.
 - GitHub platform setup is not fully represented by files: `main` protection/ruleset, required status checks, label definitions, and Template repository mode must be configured once per repo. See `docs/REPOSITORY_SETUP.md`.
 
 ## Deferred
 
-- Executable local Codex Runner
-- Automated reviewer-provider adapters
-- Transactional installer/rollback implementation
 - Optional GitHub Project board automation
+- Additional Developer/Reviewer provider adapters beyond the first executable path
 
 ## Next Recommended Step
 
-Complete `docs/REPOSITORY_SETUP.md`, then use this framework on one real product Issue end-to-end. Capture friction before implementing Runner automation.
+Implement Issue #1 on a dedicated feature branch. The first Runner must automatically generate Developer/Repair/Reviewer prompts and invoke the configured model adapters; users must not manually copy/paste prompts in the normal workflow.
 
 ## Review Status
 
 - Framework bootstrap checkpoint exists and its framework validation passed.
-- Independent Reviewer has not reviewed the framework itself.
+- Issue #1 implementation has not started yet.
 - Dynamic CI/review status: query GitHub live.
 
 ## State Update Rule
