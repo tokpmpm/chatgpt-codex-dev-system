@@ -13,7 +13,7 @@ This file stores stable facts, checkpoints, architecture decisions, known limita
 - Target version: `v1.0.0`
 - Feature branch: bootstrap on `main`; future changes use feature/chore branches
 - Latest product checkpoint SHA: `PENDING_V1_BOOTSTRAP_SHA`
-- Current Issue: framework bootstrap (no Issue created before repository initialization)
+- Current Issue: framework bootstrap (no Issue existed before repository initialization)
 - Current milestone: reusable workflow v1
 
 ## Validated Scope
@@ -33,7 +33,7 @@ This file stores stable facts, checkpoints, architecture decisions, known limita
 
 - v1 defines Runner behavior but does not yet implement automatic model invocation.
 - Generic CI cannot know a product's test stack; downstream product repositories must provide `ci/ai-verify.sh` when a recognized product marker exists.
-- GitHub labels and repository template mode may require one-time repository configuration outside this repo content.
+- GitHub labels and repository template mode may require one-time repository configuration outside repo content.
 
 ## Deferred
 
