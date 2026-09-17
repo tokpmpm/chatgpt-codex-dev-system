@@ -1,67 +1,91 @@
 # ChatGPT × GitHub × Codex — AI Development System
 
-A reusable workflow for website, Web App, and tool projects where GitHub is the long-term source of truth and the Runner automates prompt generation, Codex execution, CI gating, and Independent Review.
+A reusable workflow for websites, Web Apps, and tool projects where GitHub is the long-term source of truth and `ai-dev` automates prompt generation, Codex execution, CI gating, and Independent Review.
 
 ## Roles
 
-- **ChatGPT** — product planning, architecture, Acceptance Criteria, issue planning, repair plans, acceptance, and next-step decisions.
-- **Runner** — reads approved GitHub/repo state, generates prompts automatically, invokes Codex and the Independent Reviewer, applies workflow guards, and records evidence.
-- **Codex** — implementation, tests, bug fixes, regression, local validation, and execution of the approved Issue/Repair Plan through the Runner.
+- **ChatGPT** — product planning, architecture, Acceptance Criteria, Issue planning, Repair Plans, acceptance, and next-step decisions.
+- **Runner (`ai-dev`)** — reads approved GitHub/repo state, generates prompts automatically, invokes Developer/Reviewer adapters, applies guards, records audit evidence, and controls workflow transitions.
+- **Codex** — implementation, tests, bug fixes, regression, and local validation through the Runner.
 - **GitHub** — Issues, PRs, commits, CI evidence, review evidence, workflow state, and durable handoff state.
 - **Independent Reviewer** — fresh isolated read-only review against Acceptance Criteria; returns `APPROVE`, `REQUEST_CHANGES`, or `REVIEW_ERROR`.
-- **User** — product direction and explicit approval for Repair Plans that require approval, exceptional repair, merge, and production deploy.
+- **User** — product direction and explicit approval for protected Repair, exceptional repair, merge, and production deploy decisions.
 
-## Target user experience
+## Quick start
 
-The end state is not manual prompt copy/paste. A normal run should be close to:
+Prerequisites: Git, GitHub CLI (`gh`) authenticated to the target repository, Python 3, and Codex CLI authenticated locally.
 
-```text
+Install the Runner from this repository:
+
+```bash
+bash tools/codex-runner/install.sh
+```
+
+Then, from a product repository containing this framework:
+
+```bash
+ai-dev status
 ai-dev start --issue 12
 ```
 
-The Runner automatically builds the Developer prompt from the Issue, Acceptance Criteria, repo state, and exact SHA, invokes Codex, validates the result, pushes the candidate, waits for/checks exact-SHA CI, builds the Reviewer prompt, and invokes a fresh isolated Reviewer.
-
-## Start here
-
-Every new ChatGPT/Codex/Reviewer session reads, in order:
-
-1. `AGENTS.md`
-2. `docs/PROJECT_STATE.md`
-3. `docs/AI_WORKFLOW.md`
-4. `docs/REVIEW_PROTOCOL.md`
-5. the current GitHub Issue and, when present, its PR
-
-Then verify branch, HEAD SHA, working tree, and current GitHub CI/review status instead of relying on previous chat history.
+No manual Developer/Reviewer prompt copy-paste is required. The Runner builds prompts from the Issue, Acceptance Criteria, repository protocols, current branch/SHA, CI evidence, and approved Repair Plan when applicable.
 
 ## Core flow
 
 ```text
 Product request
   → GitHub Issue + verifiable Acceptance Criteria
-  → Runner auto-generates Developer prompt
-  → Runner invokes Codex
-  → targeted tests + real-flow validation + negative cases
-  → full regression
+  → ai-dev generates Developer prompt
+  → Codex implementation
+  → local validation + regression
   → commit + push feature branch
   → exact-SHA CI PASS
-  → Runner auto-generates Reviewer prompt
-  → isolated Independent Review
-      → APPROVE → user-approved merge/deploy
-      → REQUEST_CHANGES → ChatGPT Repair Plan → user approval → Runner auto-generates repair prompt → Codex repair → Delta Review
+  → ai-dev generates Reviewer prompt
+  → fresh isolated Independent Review
+      → APPROVE → release gate; merge/deploy still require explicit user approval
+      → REQUEST_CHANGES → Repair Plan → explicit approval → automated repair → Delta Review
       → REVIEW_ERROR → same-SHA reviewer retry/recovery; no product repair
 ```
 
-Medium/high-risk work uses `docs/ONE_SHOT_DELIVERY_PROTOCOL.md`. Formal product repair is capped at two rounds unless the user explicitly authorizes a separately recorded exceptional repair.
+Medium/high-risk work uses `docs/ONE_SHOT_DELIVERY_PROTOCOL.md`. Formal product repair is capped at two rounds unless an exceptional repair is separately authorized and recorded.
 
-## Reuse in a product repository
+## Runner commands
 
-Copy the framework files into the product repository, keep product code outside `skills/` and `docs/`, then fill `docs/PROJECT_STATE.md`. For repositories containing a recognized product marker (`package.json`, `pyproject.toml`, `Cargo.toml`, or `go.mod`), `.github/workflows/review.yml` requires an executable `ci/ai-verify.sh` so CI cannot silently pass without product validation.
+```text
+ai-dev status
+ai-dev start --issue <n>
+ai-dev review --sha <sha> [--issue <n>]
+ai-dev approve-repair --plan <plan-id> [--issue <n>]
+ai-dev repair --plan <plan-id> [--issue <n>]
+ai-dev recover-review --sha <sha> [--issue <n>]
+ai-dev self-test
+```
 
-Complete the one-time GitHub platform setup in `docs/REPOSITORY_SETUP.md`: protect `main`, require the exact-SHA validation check, create the workflow labels, and enable Template repository mode when this repo is used as a template source.
+The supported entrypoint is `ai-dev`. `tools/codex-runner/runner.py` is the core engine; `entrypoint.py` adds fail-closed guards and durable audit confirmation.
 
-## Runner status
+## Reuse in another repository
 
-The workflow contracts and CI gate exist today. The executable Runner is the next implementation milestone. Its contract is in `tools/codex-runner/README.md` and now explicitly requires automatic prompt generation and non-interactive Codex/Reviewer invocation. Users should not need to paste prompts or operate Codex CLI manually.
+Copy the framework files into the product repository, fill `docs/PROJECT_STATE.md`, and replace/extend `ci/ai-verify.sh` with the product's real targeted, real-flow, negative-case, and regression validation. A product repository must not treat the framework-only validation script as a sufficient product gate.
+
+Complete the one-time GitHub setup in `docs/REPOSITORY_SETUP.md`: protect `main`, require the exact-SHA validation check, create the workflow labels, and enable Template repository mode when using this repository as a source template.
+
+## Safety boundaries
+
+- No automatic merge to `main`.
+- No automatic production deploy.
+- Reviewer runs only after exact-SHA CI PASS.
+- Review/Planner adapters run read-only in isolated sessions/worktrees.
+- `REVIEW_ERROR` never consumes a product repair round.
+- Review-only recovery cannot call Developer, rerun regression, rerun CI, or change product SHA.
+- Normal formal product repair maximum remains 2.
+
+## Verification
+
+```bash
+bash tools/codex-runner/self-test.sh
+```
+
+The deterministic fixture suite is run against source, staged, and installed copies. GitHub Actions runs the same verification through `ci/ai-verify.sh`.
 
 ## Directory map
 
@@ -69,9 +93,9 @@ The workflow contracts and CI gate exist today. The executable Runner is the nex
 AGENTS.md
 docs/                  Durable workflow, project state, and repo setup
 skills/                Reusable agent procedures
-templates/             Issue/review/repair structures used by ChatGPT/Runner
-tools/codex-runner/     Automated Runner contract
-.github/workflows/      CI gate
+templates/             Issue/review/repair structures
+tools/codex-runner/     Executable automated Runner + tests + installer
+.github/workflows/      Exact-SHA CI gate
 ```
 
-The workflow is intentionally GitHub-centered: a fresh session should be able to recover current state from the repository and GitHub without replaying old conversations.
+The workflow is GitHub-centered: a fresh session should recover current state from the repository and GitHub without replaying old conversations.
