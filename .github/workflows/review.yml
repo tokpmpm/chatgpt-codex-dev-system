@@ -1,0 +1,58 @@
+name: Review Gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-sha-validation:
+    name: Exact SHA validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout candidate SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Verify exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            expected="${{ github.event.pull_request.head.sha }}"
+          else
+            expected="${GITHUB_SHA}"
+          fi
+          actual="$(git rev-parse HEAD)"
+          echo "expected_sha=$expected"
+          echo "actual_sha=$actual"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::Checked out SHA does not match event candidate SHA"
+            exit 1
+          fi
+          echo "PRODUCT_SHA=$actual" >> "$GITHUB_ENV"
+
+      - name: Run repository validation entrypoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -x ci/ai-verify.sh ]]; then
+            echo "::error::ci/ai-verify.sh is missing or not executable"
+            exit 1
+          fi
+          ./ci/ai-verify.sh
+
+      - name: Record evidence
+        shell: bash
+        run: |
+          {
+            echo "## Review Gate"
+            echo "- Exact candidate SHA: \`$PRODUCT_SHA\`"
+            echo "- Repository validation: PASS"
+            echo "- Independent Reviewer may only review this SHA after required product CI is genuinely represented by ci/ai-verify.sh."
+          } >> "$GITHUB_STEP_SUMMARY"
