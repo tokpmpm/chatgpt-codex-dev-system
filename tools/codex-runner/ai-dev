@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec python3 "$DIR/runner.py" "$@"
+
+# Codex CLI treats --ask-for-approval as a global option in current releases,
+# so keep it before the exec subcommand. Users may override any adapter command.
+: "${AI_DEV_DEVELOPER_CMD:=codex --ask-for-approval never exec --sandbox workspace-write --json --ephemeral}"
+: "${AI_DEV_REVIEWER_CMD:=codex --ask-for-approval never exec --sandbox read-only --json --ephemeral}"
+: "${AI_DEV_PLANNER_CMD:=codex --ask-for-approval never exec --sandbox read-only --json --ephemeral}"
+export AI_DEV_DEVELOPER_CMD AI_DEV_REVIEWER_CMD AI_DEV_PLANNER_CMD
+
+exec python3 "$DIR/entrypoint.py" "$@"
