@@ -26,6 +26,14 @@ required=(
   templates/PROJECT_STATE.md
   templates/CODEX_PROMPT.md
   tools/codex-runner/README.md
+  tools/codex-runner/ai-dev
+  tools/codex-runner/runner.py
+  tools/codex-runner/entrypoint.py
+  tools/codex-runner/config.example.json
+  tools/codex-runner/install.sh
+  tools/codex-runner/self-test.sh
+  tools/codex-runner/tests/test_runtime.py
+  tools/codex-runner/tests/test_hardening.py
 )
 
 for path in "${required[@]}"; do
@@ -52,5 +60,12 @@ fi
 grep -q "REVIEW_ERROR" docs/REVIEW_PROTOCOL.md
 grep -q "Maximum formal product repair rounds: 2" docs/REPAIR_PROTOCOL.md
 grep -q "explicit user approval" skills/release-gate/SKILL.md
+grep -q "Do not ask the user to relay prompts" tools/codex-runner/runner.py
 
-echo "Framework contract verification: PASS"
+bash -n tools/codex-runner/ai-dev
+bash -n tools/codex-runner/install.sh
+bash -n tools/codex-runner/self-test.sh
+python3 -m py_compile tools/codex-runner/runner.py tools/codex-runner/entrypoint.py
+bash tools/codex-runner/self-test.sh
+
+echo "Framework contract + automated Runner verification: PASS"
