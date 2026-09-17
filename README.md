@@ -44,6 +44,8 @@ Medium/high-risk work uses `docs/ONE_SHOT_DELIVERY_PROTOCOL.md`. Formal product 
 
 Copy the framework files into the product repository, keep product code outside `skills/` and `docs/`, then fill `docs/PROJECT_STATE.md`. For repositories containing a recognized product marker (`package.json`, `pyproject.toml`, `Cargo.toml`, or `go.mod`), `.github/workflows/review.yml` requires an executable `ci/ai-verify.sh` so CI cannot silently pass without product validation.
 
+Complete the one-time GitHub platform setup in `docs/REPOSITORY_SETUP.md`: protect `main`, require the exact-SHA validation check, create the workflow labels, and enable Template repository mode when this repo is used as a template source.
+
 ## What v1 intentionally does not automate
 
 v1 does not automatically invoke Codex or a reviewer model, merge, deploy, or mutate production. `tools/codex-runner/README.md` defines the runner contract for a later implementation with SHA/branch/dirty-tree guards, reviewer isolation, retry semantics, repair-round tracking, deterministic fixture tests, and transactional install/rollback.
@@ -52,7 +54,7 @@ v1 does not automatically invoke Codex or a reviewer model, merge, deploy, or mu
 
 ```text
 AGENTS.md
-docs/                  Durable workflow and project state
+docs/                  Durable workflow, project state, and repo setup
 skills/                Reusable agent procedures
 templates/             Copy-ready Issue/review/repair artifacts
 tools/codex-runner/     Runner architecture contract
