@@ -11,10 +11,10 @@ This file stores stable facts, checkpoints, architecture decisions, known limita
 ## Current Development
 
 - Target version: `v1.0.0`
-- Feature branch: bootstrap on `main`; future changes use feature/chore branches
-- Latest product checkpoint SHA: `PENDING_V1_BOOTSTRAP_SHA`
-- Current Issue: framework bootstrap (no Issue existed before repository initialization)
-- Current milestone: reusable workflow v1
+- Feature branch: bootstrap completed on `main`; future changes use feature/chore branches
+- Latest product checkpoint SHA: `43f400bd2e5e93ea4e395fc08fec129540188134`
+- Current Issue: framework bootstrap completed without a pre-existing Issue
+- Current milestone: reusable workflow v1 pilot-ready
 
 ## Validated Scope
 
@@ -28,11 +28,12 @@ This file stores stable facts, checkpoints, architecture decisions, known limita
 - explicit review-only recovery semantics
 - session handoff contract
 - release gate requiring explicit user approval
+- framework contract validation workflow executes successfully at the v1 checkpoint
 
 ## Known Risks
 
 - v1 defines Runner behavior but does not yet implement automatic model invocation.
-- Generic CI cannot know a product's test stack; downstream product repositories must provide `ci/ai-verify.sh` when a recognized product marker exists.
+- A product repository must replace/extend the framework-only `ci/ai-verify.sh` with real product validation before treating CI as a product release/review gate.
 - GitHub labels and repository template mode may require one-time repository configuration outside repo content.
 
 ## Deferred
@@ -48,7 +49,8 @@ Use this framework on one real product Issue end-to-end. Capture friction before
 
 ## Review Status
 
-- Framework bootstrap: not independently reviewed yet.
+- Framework bootstrap checkpoint exists and its framework validation passed.
+- Independent Reviewer has not reviewed the framework itself.
 - Dynamic CI/review status: query GitHub live.
 
 ## State Update Rule
