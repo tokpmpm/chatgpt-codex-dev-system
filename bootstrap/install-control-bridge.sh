@@ -77,6 +77,7 @@ cat > "$PLIST" <<EOF
 EOF
 
 launchctl bootout "gui/$UID/$LABEL" >/dev/null 2>&1 || true
+rm -rf "$STATE_DIR/lock"
 launchctl bootstrap "gui/$UID" "$PLIST"
 launchctl kickstart -k "gui/$UID/$LABEL"
 
