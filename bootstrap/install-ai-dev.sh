@@ -56,12 +56,9 @@ if [ "$DOCTOR_RC" -ne 0 ]; then
   exit "$DOCTOR_RC"
 fi
 
-if [ -f "$PLIST" ]; then
-  launchctl bootout "gui/$UID/com.meshthings.ai-dev-control-bridge" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$UID" "$PLIST" >/dev/null 2>&1 || true
-  launchctl kickstart -k "gui/$UID/com.meshthings.ai-dev-control-bridge" >/dev/null 2>&1 || true
-fi
-
+# Do not restart the control bridge from inside a bridge-triggered install.
+# The running bridge must be allowed to ACK the command and release its lock.
+# The next LaunchAgent invocation will use the newly installed bridge file.
 echo "AI Dev installed"
 echo "version_sha=$VERSION_SHA"
 echo "binary=$BIN"
