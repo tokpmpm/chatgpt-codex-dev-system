@@ -117,6 +117,7 @@ assert_pass_for "fixture-daemon-1"
 [[ ! -d "$HOME/.local/state/ai-dev-control-bridge/lock" ]]
 
 # 5) syntax + ai-dev self-test.
-bash "$ROOT/tools/ai-dev/ai-dev" self-test | grep -Fq "PASS branch-lease"
+self_test_output="$(bash "$ROOT/tools/ai-dev/ai-dev" self-test)"
+printf '%s\n' "$self_test_output" | grep -F "PASS branch-lease" >/dev/null
 
 echo "Control bridge fixture: PASS"
