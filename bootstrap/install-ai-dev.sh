@@ -42,7 +42,7 @@ if [ -f "$BRIDGE_SRC" ]; then
 fi
 
 set +e
-"$BIN" doctor
+"$BIN" doctor --repair
 DOCTOR_RC=$?
 set -e
 if [ "$DOCTOR_RC" -ne 0 ]; then
