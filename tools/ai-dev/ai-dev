@@ -243,12 +243,33 @@ codex_exec() {
   fi
 }
 
+ensure_project_dependencies() {
+  local wt="$1"
+  [ -f "$wt/package.json" ] || return 0
+  local npm_bin
+  npm_bin="$(find_tool npm 2>/dev/null || true)"
+  [ -n "$npm_bin" ] || die "MISSING_DEPENDENCY" "npm not found for project validation" 14
+
+  if [ -f "$wt/package-lock.json" ]; then
+    if [ ! -d "$wt/node_modules" ]; then
+      info "Installing locked project dependencies with npm ci..."
+      (cd "$wt" && "$npm_bin" ci --no-audit --no-fund)
+    fi
+  elif [ ! -d "$wt/node_modules" ]; then
+    info "Installing project dependencies with npm install..."
+    (cd "$wt" && "$npm_bin" install --no-audit --no-fund)
+  fi
+}
+
 run_regression() {
   local wt="$1"
+  ensure_project_dependencies "$wt"
+  local npm_bin
+  npm_bin="$(find_tool npm 2>/dev/null || true)"
   if [ -f "$wt/package.json" ] && grep -q '"test:regression"' "$wt/package.json"; then
-    (cd "$wt" && npm run test:regression)
+    (cd "$wt" && "$npm_bin" run test:regression)
   elif [ -f "$wt/package.json" ] && grep -q '"test"' "$wt/package.json"; then
-    (cd "$wt" && npm test)
+    (cd "$wt" && "$npm_bin" test)
   else
     info "No npm regression command detected; skipping generic regression."
   fi
@@ -556,9 +577,15 @@ cmd_repair() {
   save_state
   codex_exec "$wt" "$prompt" write | tee "$LOG_DIR/codex-$ISSUE-$RUN_ID.log"
   LAST_PHASE="codex-finished"
+  WORKFLOW_STATE="validation-running"
   save_state
 
-  run_regression "$wt" | tee "$LOG_DIR/regression-$ISSUE-$RUN_ID.log"
+  if ! run_regression "$wt" | tee "$LOG_DIR/regression-$ISSUE-$RUN_ID.log"; then
+    WORKFLOW_STATE="recoverable"
+    LAST_PHASE="regression-failed"
+    save_state
+    die "REGRESSION_FAILED_RECOVERABLE" "worktree=$wt preserved=yes; fix validation environment or product issue, then use ai-dev resume" 15
+  fi
   LAST_PHASE="regression-pass"
   save_state
 
@@ -574,6 +601,52 @@ cmd_repair() {
   CURRENT_WORKTREE=""
   save_state
   info "REPAIR_COMPLETE candidate=$PRODUCT_SHA verdict=$verdict"
+}
+
+cmd_resume() {
+  local repo="" issue=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="$2"; shift 2 ;;
+      --issue) issue="$2"; shift 2 ;;
+      *) die "INVALID_ARGUMENT" "unknown resume argument: $1" 44 ;;
+    esac
+  done
+  load_state "$repo" "$issue"
+  [ "$WORKFLOW_STATE" = "recoverable" ] || die "INVALID_STATE" "state=$WORKFLOW_STATE expected=recoverable" 45
+  [ -n "$CURRENT_WORKTREE" ] && [ -d "$CURRENT_WORKTREE" ] ||     die "RECOVERABLE_WORKTREE_MISSING" "path=$CURRENT_WORKTREE" 46
+
+  local cache wt before verdict
+  cache="$(ensure_repo_cache)"
+  wt="$CURRENT_WORKTREE"
+  before="$(git -C "$wt" rev-parse HEAD)"
+  [ "$before" = "$EXECUTION_BASE_SHA" ] ||     die "RECOVERABLE_HEAD_DRIFT" "expected_execution_base=$EXECUTION_BASE_SHA actual=$before worktree=$wt" 47
+
+  WORKFLOW_STATE="validation-running"
+  LAST_PHASE="resume-validation"
+  save_state
+
+  if ! run_regression "$wt" | tee "$LOG_DIR/regression-$ISSUE-$RUN_ID-resume.log"; then
+    WORKFLOW_STATE="recoverable"
+    LAST_PHASE="regression-failed"
+    save_state
+    die "REGRESSION_FAILED_RECOVERABLE" "worktree=$wt preserved=yes after resume" 15
+  fi
+
+  LAST_PHASE="regression-pass"
+  save_state
+  commit_candidate "$wt" "$before"
+  push_candidate "$wt"
+  git -C "$cache" fetch origin "$BRANCH" >/dev/null
+  wait_ci "$PRODUCT_SHA"
+
+  REVIEW_VERDICT=""
+  run_review "$cache"
+  verdict="$REVIEW_VERDICT"
+  cleanup_worktree "$cache" "$wt"
+  CURRENT_WORKTREE=""
+  save_state
+  info "RESUME_COMPLETE candidate=$PRODUCT_SHA verdict=$verdict"
 }
 
 cmd_recover_review() {
@@ -676,6 +749,7 @@ Commands:
   ai-dev import-repair --repo OWNER/REPO --issue N --branch BRANCH --review-sha SHA [--support-commit SHA] [--support-path PATH] [--round N]
   ai-dev support add --repo OWNER/REPO --issue N --commit SHA [--path PATH]
   ai-dev repair --repo OWNER/REPO --issue N [--dry-run]
+  ai-dev resume --repo OWNER/REPO --issue N
   ai-dev recover-review --repo OWNER/REPO --issue N
   ai-dev self-test
   ai-dev version
@@ -695,6 +769,7 @@ case "$cmd" in
     cmd_support_add "$@"
     ;;
   repair) cmd_repair "$@" ;;
+  resume) cmd_resume "$@" ;;
   recover-review) cmd_recover_review "$@" ;;
   self-test) cmd_self_test ;;
   version) printf 'ai-dev %s\n' "$AI_DEV_VERSION" ;;
