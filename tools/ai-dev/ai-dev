@@ -7,6 +7,10 @@ DATA_DIR="${AI_DEV_DATA_DIR:-$HOME/.local/share/ai-dev}"
 LOG_DIR="${AI_DEV_LOG_DIR:-$HOME/Library/Logs/ai-dev}"
 CONFIG_DIR="${AI_DEV_CONFIG_DIR:-$HOME/.config/ai-dev}"
 mkdir -p "$STATE_DIR/tasks" "$STATE_DIR/leases" "$STATE_DIR/locks" "$DATA_DIR/repos" "$DATA_DIR/worktrees" "$LOG_DIR" "$CONFIG_DIR"
+if [ -f "$CONFIG_DIR/runtime.env" ]; then
+  # shellcheck disable=SC1090
+  . "$CONFIG_DIR/runtime.env"
+fi
 
 die() { printf 'ERROR[%s] %s\n' "$1" "$2" >&2; exit "${3:-1}"; }
 info() { printf '%s\n' "$*"; }
@@ -14,8 +18,34 @@ slug() { printf '%s' "$1" | tr '/: .' '____'; }
 now() { date '+%Y-%m-%dT%H:%M:%S%z'; }
 shortsha() { printf '%s' "$1" | cut -c1-8; }
 
+find_tool() {
+  local name="$1" p
+  p="$(command -v "$name" 2>/dev/null || true)"
+  if [ -n "$p" ] && [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  for p in     "$HOME/.local/bin/$name"     "$HOME/.npm-global/bin/$name"     "$HOME/.volta/bin/$name"     "$HOME/Library/pnpm/$name"     "/opt/homebrew/bin/$name"     "/usr/local/bin/$name"     "/usr/bin/$name"; do
+    if [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  done
+  for p in "$HOME"/.nvm/versions/node/*/bin/"$name" "$HOME"/.fnm/node-versions/*/installation/bin/"$name"; do
+    if [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  done
+  return 1
+}
+
 need() {
-  command -v "$1" >/dev/null 2>&1 || die "MISSING_DEPENDENCY" "$1 not found" 2
+  find_tool "$1" >/dev/null 2>&1 || die "MISSING_DEPENDENCY" "$1 not found" 2
+}
+
+resolve_codex() {
+  if [ -n "${CODEX_BIN:-}" ] && [ -x "${CODEX_BIN:-}" ]; then
+    printf '%s' "$CODEX_BIN"
+    return 0
+  fi
+  local legacy="$HOME/.config/life-balance-codex-runner/config.env" p
+  if [ -f "$legacy" ]; then
+    p="$(sed -n 's/^CODEX_BIN="\(.*\)"$/\1/p; s/^CODEX_BIN=\(.*\)$/\1/p' "$legacy" | head -1)"
+    if [ -n "$p" ] && [ -x "$p" ]; then printf '%s' "$p"; return 0; fi
+  fi
+  find_tool codex
 }
 
 state_file() {
@@ -184,11 +214,12 @@ build_repair_prompt() {
 
 codex_exec() {
   local wt="$1" prompt_file="$2" mode="${3:-write}" help prompt
-  need codex
-  help="$(codex exec --help 2>&1 || true)"
+  local codex_bin
+  codex_bin="$(resolve_codex)" || die "MISSING_DEPENDENCY" "codex not found in LaunchAgent PATH or known install locations" 2
+  help="$("$codex_bin" exec --help 2>&1 || true)"
   prompt="$(cat "$prompt_file")"
   local -a cmd
-  cmd=(codex exec)
+  cmd=("$codex_bin" exec)
   if printf '%s' "$help" | grep -q -- '--skip-git-repo-check'; then
     cmd+=(--skip-git-repo-check)
   fi
@@ -348,15 +379,33 @@ $(printf '%s' "$output" | tail -c 5000)
 cmd_doctor() {
   local repair="false"
   [ "${1:-}" = "--repair" ] && repair="true"
-  local bad=0
-  for c in git gh codex; do
-    if command -v "$c" >/dev/null 2>&1; then
-      printf 'PASS %-14s %s\n' "$c" "$(command -v "$c")"
+  local bad=0 p
+  for c in git gh; do
+    p="$(find_tool "$c" 2>/dev/null || true)"
+    if [ -n "$p" ]; then
+      printf 'PASS %-14s %s\n' "$c" "$p"
     else
       printf 'FAIL %-14s missing\n' "$c"
       bad=1
     fi
   done
+
+  p="$(resolve_codex 2>/dev/null || true)"
+  if [ -n "$p" ]; then
+    printf 'PASS %-14s %s\n' "codex" "$p"
+    if [ "$repair" = "true" ]; then
+      mkdir -p "$HOME/.local/bin" "$CONFIG_DIR"
+      if [ "$p" != "$HOME/.local/bin/codex" ]; then
+        ln -sfn "$p" "$HOME/.local/bin/codex"
+        printf 'REPAIR codex-path     linked %s -> %s\n' "$HOME/.local/bin/codex" "$p"
+      fi
+      printf 'CODEX_BIN=%q\n' "$p" > "$CONFIG_DIR/runtime.env"
+    fi
+  else
+    printf 'FAIL %-14s missing in shell PATH, legacy config, and known install locations\n' "codex"
+    bad=1
+  fi
+
   if gh auth status >/dev/null 2>&1; then
     printf 'PASS gh-auth        authenticated\n'
   else
