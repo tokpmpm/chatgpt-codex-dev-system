@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/tools/ai-dev/ai-dev"
 BRIDGE_SRC="$ROOT/bootstrap/ai-dev-control-bridge.sh"
+WORKER_SRC="$ROOT/bootstrap/ai-dev-control-worker.sh"
 VERSION_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || date +%s)"
 BASE="$HOME/.local/lib/ai-dev"
 VERSIONS="$BASE/versions"
@@ -13,6 +14,7 @@ BIN_DIR="$HOME/.local/bin"
 BIN="$BIN_DIR/ai-dev"
 BRIDGE_DIR="$HOME/.local/lib/ai-dev-control-bridge"
 BRIDGE="$BRIDGE_DIR/bridge.sh"
+WORKER="$BRIDGE_DIR/worker.sh"
 PLIST="$HOME/Library/LaunchAgents/com.meshthings.ai-dev-control-bridge.plist"
 OLD_ACTIVE=""
 
@@ -39,6 +41,11 @@ if [ -f "$BRIDGE_SRC" ]; then
   cp "$BRIDGE_SRC" "$BRIDGE.tmp"
   chmod 700 "$BRIDGE.tmp"
   mv "$BRIDGE.tmp" "$BRIDGE"
+fi
+if [ -f "$WORKER_SRC" ]; then
+  cp "$WORKER_SRC" "$WORKER.tmp"
+  chmod 700 "$WORKER.tmp"
+  mv "$WORKER.tmp" "$WORKER"
 fi
 
 set +e
