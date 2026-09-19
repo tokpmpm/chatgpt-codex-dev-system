@@ -1,5 +1,5 @@
 #!/bin/bash
-set -u
+set -uo pipefail
 
 LIB_DIR="$HOME/.local/lib/ai-dev-control-bridge"
 CONFIG="$LIB_DIR/config.env"
