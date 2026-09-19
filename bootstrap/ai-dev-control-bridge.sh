@@ -144,7 +144,7 @@ kill_tree() {
 
 do_snapshot_stop_active() {
   local target_repo="$1" target_issue="$2"
-  local worker_pid="" state_file worktree recovery_branch snapshot_sha dirty
+  local worker_pid="" state_file worktree recovery_branch snapshot_sha dirty current_branch large_files path
   if [ -f "$ACTIVE_WORKER" ]; then
     worker_pid="$(sed -n 's/^PID=//p' "$ACTIVE_WORKER" | head -1)"
   fi
@@ -161,15 +161,47 @@ do_snapshot_stop_active() {
   . "$state_file"
   worktree="${CURRENT_WORKTREE:-}"
   [ -n "$worktree" ] && [ -d "$worktree" ] || { echo "worktree-missing:$worktree"; return 19; }
+  [ -n "${EXECUTION_BASE_SHA:-}" ] || { echo "execution-base-missing"; return 28; }
+
+  # A previous snapshot attempt may have created a local WIP commit containing
+  # generated files. Reset to the guarded execution base while preserving all
+  # file changes in the worktree.
+  git -C "$worktree" reset --mixed "$EXECUTION_BASE_SHA" >/dev/null || return 29
 
   recovery_branch="recovery/issue-${target_issue}-new-runner-wip-$(date '+%Y%m%d-%H%M%S')"
-  git -C "$worktree" checkout -b "$recovery_branch" >/dev/null 2>&1 || return 20
-  dirty="$(git -C "$worktree" status --porcelain)"
-  if [ -n "$dirty" ]; then
-    git -C "$worktree" add -A
-    git -C "$worktree" -c user.name="AI Dev Rollback" -c user.email="ai-dev@local" \
-      commit -m "wip: preserve issue #$target_issue before runner rollback" >/dev/null || return 21
+  current_branch="$(git -C "$worktree" branch --show-current)"
+  if [ -n "$current_branch" ]; then
+    git -C "$worktree" branch -m "$recovery_branch" >/dev/null || return 20
+  else
+    git -C "$worktree" checkout -b "$recovery_branch" >/dev/null || return 20
   fi
+
+  # Preserve source/design changes only. Never snapshot generated runtime
+  # dependencies, browser output, built sites, or runner prompt files.
+  git -C "$worktree" add -u -- .     ':(exclude)node_modules/**'     ':(exclude)output/**'     ':(exclude)site/**'     ':(exclude)site-staging/**' >/dev/null 2>&1 || true
+
+  while IFS= read -r -d '' path; do
+    case "$path" in
+      node_modules/*|output/*|site/*|site-staging/*|.ai-dev-*) continue ;;
+      *) git -C "$worktree" add -- "$path" ;;
+    esac
+  done < <(git -C "$worktree" ls-files --others --exclude-standard -z)
+
+  dirty="$(git -C "$worktree" diff --cached --name-only)"
+  if [ -z "$dirty" ]; then
+    echo "no-source-changes-to-snapshot"
+    rm -f "$ACTIVE_WORKER"
+    return 0
+  fi
+
+  git -C "$worktree" -c user.name="AI Dev Rollback" -c user.email="ai-dev@local"     commit -m "wip: preserve issue #$target_issue before legacy runner rollback" >/dev/null || return 21
+
+  large_files="$(git -C "$worktree" ls-tree -r -l HEAD | awk '$4 ~ /^[0-9]+$/ && $4 > 90000000 {print $5 ":" $4}')"
+  if [ -n "$large_files" ]; then
+    echo "snapshot-large-files-blocked:$large_files"
+    return 30
+  fi
+
   snapshot_sha="$(git -C "$worktree" rev-parse HEAD)"
   git -C "$worktree" push origin "HEAD:refs/heads/$recovery_branch" >/dev/null || return 22
   rm -f "$ACTIVE_WORKER"
