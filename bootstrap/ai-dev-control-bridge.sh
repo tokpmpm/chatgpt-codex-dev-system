@@ -22,9 +22,21 @@ fi
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
-  exit 0
+  if [ -f "$LOCKDIR/pid" ]; then
+    OLD_PID="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+    if [ -n "$OLD_PID" ] && ! kill -0 "$OLD_PID" 2>/dev/null; then
+      rm -rf "$LOCKDIR"
+      mkdir "$LOCKDIR" 2>/dev/null || exit 0
+    else
+      exit 0
+    fi
+  else
+    rm -rf "$LOCKDIR"
+    mkdir "$LOCKDIR" 2>/dev/null || exit 0
+  fi
 fi
-trap 'rmdir "$LOCKDIR" >/dev/null 2>&1 || true' EXIT
+printf '%s\n' "$" > "$LOCKDIR/pid"
+trap 'rm -rf "$LOCKDIR" >/dev/null 2>&1 || true' EXIT
 
 log() {
   printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >> "$LOG_DIR/bridge.log"
