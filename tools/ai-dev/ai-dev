@@ -655,10 +655,10 @@ cmd_self_test() {
   cleanup_worktree "$cache" "$PREPARED_WORKTREE"
   printf 'PASS reviewed-sha-plus-approved-support\n'
 
-  if grep -Fq 'wt="$(prepare_repair_worktree' "$0"; then
+  if awk '$0 ~ /^[[:space:]]*wt="\$\(prepare_repair_worktree/ {found=1} END{exit(found?0:1)}' "$0"; then
     die "SELF_TEST_SUBSHELL_STATE" "prepare_repair_worktree must not run in command substitution" 55
   fi
-  if grep -Fq 'verdict="$(run_review' "$0"; then
+  if awk '$0 ~ /^[[:space:]]*verdict="\$\(run_review/ {found=1} END{exit(found?0:1)}' "$0"; then
     die "SELF_TEST_SUBSHELL_STATE" "run_review must not run in command substitution" 56
   fi
   printf 'PASS no-stateful-command-substitution\n'
