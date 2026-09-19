@@ -108,7 +108,15 @@ calls_after="$(wc -l < "$CALL_LOG" | tr -d ' ')"
 [[ ! -s "$PATCH_BODY" ]]
 [[ "$calls_after" -gt "$calls_before" ]]
 
-# 4) syntax + ai-dev self-test.
+# 4) daemon mode survives multiple polling loops and writes heartbeat.
+: > "$PATCH_BODY"
+write_ping "fixture-daemon-1"
+AI_DEV_DAEMON_MAX_LOOPS=2 AI_DEV_POLL_SECONDS=0 bash "$BRIDGE" --daemon
+assert_pass_for "fixture-daemon-1"
+[[ -f "$HOME/.local/state/ai-dev-control-bridge/heartbeat" ]]
+[[ ! -d "$HOME/.local/state/ai-dev-control-bridge/lock" ]]
+
+# 5) syntax + ai-dev self-test.
 bash "$ROOT/tools/ai-dev/ai-dev" self-test | grep -Fq "PASS branch-lease"
 
 echo "Control bridge fixture: PASS"
