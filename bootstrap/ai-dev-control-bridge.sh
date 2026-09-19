@@ -9,6 +9,8 @@ PROCESSED="$STATE_DIR/processed-command-ids"
 LOCKDIR="$STATE_DIR/lock"
 FRAMEWORK_DIR="$HOME/.local/share/ai-dev/framework"
 ACTIVE_AI_DEV="$HOME/.local/bin/ai-dev"
+WORKER="$LIB_DIR/worker.sh"
+ACTIVE_WORKER="$STATE_DIR/active-worker"
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 touch "$PROCESSED"
@@ -82,6 +84,25 @@ fetch_repo_commit() {
 }
 
 do_ping() { echo "bridge-ok"; }
+
+start_async_ai_dev() {
+  local command_id="$1" action="$2" target_repo="$3" target_issue="$4"
+  [ -x "$WORKER" ] || { echo "worker-missing"; return 16; }
+
+  if [ -f "$ACTIVE_WORKER" ]; then
+    local existing_pid
+    existing_pid="$(sed -n 's/^PID=//p' "$ACTIVE_WORKER" | head -1)"
+    if [ -n "$existing_pid" ] && kill -0 "$existing_pid" 2>/dev/null; then
+      echo "worker-busy pid=$existing_pid"
+      return 17
+    fi
+    rm -f "$ACTIVE_WORKER"
+  fi
+
+  nohup "$WORKER" "$command_id" "$action" "$target_repo" "$target_issue"     > "$LOG_DIR/worker-dispatch-$command_id.log" 2>&1 &
+  local pid=$!
+  echo "STARTED pid=$pid action=$action"
+}
 
 do_disable_legacy_runner() {
   local legacy_label="com.meshthings.life-balance-codex-runner"
@@ -185,7 +206,10 @@ main_once() {
       output="$("$ACTIVE_AI_DEV" repair --repo "$target_repo" --issue "$target_issue" --dry-run 2>&1)" || rc=$?
       ;;
     AI_DEV_REPAIR)
-      output="$("$ACTIVE_AI_DEV" repair --repo "$target_repo" --issue "$target_issue" 2>&1)" || rc=$?
+      output="$(start_async_ai_dev "$command_id" "$action" "$target_repo" "$target_issue" 2>&1)" || rc=$?
+      ;;
+    AI_DEV_RESUME)
+      output="$(start_async_ai_dev "$command_id" "$action" "$target_repo" "$target_issue" 2>&1)" || rc=$?
       ;;
     AI_DEV_RECOVER_REVIEW)
       output="$("$ACTIVE_AI_DEV" recover-review --repo "$target_repo" --issue "$target_issue" 2>&1)" || rc=$?
