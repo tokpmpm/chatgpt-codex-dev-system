@@ -63,9 +63,12 @@ if [ "$DOCTOR_RC" -ne 0 ]; then
   exit "$DOCTOR_RC"
 fi
 
-# Do not restart the control bridge from inside a bridge-triggered install.
-# The running bridge must be allowed to ACK the command and release its lock.
-# The next LaunchAgent invocation will use the newly installed bridge file.
+# Restart the bridge only after this installer returns, so the current
+# bridge can ACK the SYNC_INSTALL command and release its lock first.
+if [ -f "$PLIST" ]; then
+  nohup /bin/sh -c "sleep 5; /bin/launchctl kickstart -k gui/$UID/com.meshthings.ai-dev-control-bridge"     > "$HOME/Library/Logs/ai-dev-control-bridge/restart.log" 2>&1 &
+fi
+
 echo "AI Dev installed"
 echo "version_sha=$VERSION_SHA"
 echo "binary=$BIN"
