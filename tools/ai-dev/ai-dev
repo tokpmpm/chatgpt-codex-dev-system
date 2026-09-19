@@ -624,6 +624,45 @@ cmd_self_test() {
   printf 'PASS review-target-separate-from-support\n'
   printf 'PASS branch-lease\n'
   printf 'PASS named-guard-contract\n'
+
+  # Managed repair worktree fixture: reviewed SHA A + approved support commit B.
+  local cache base_sha support_sha
+  cache="$tmp/cache"
+  git init -q "$cache"
+  git -C "$cache" config user.name "Fixture"
+  git -C "$cache" config user.email "fixture@example.invalid"
+  printf 'base\n' > "$cache/base.txt"
+  git -C "$cache" add base.txt
+  git -C "$cache" commit -q -m base
+  base_sha="$(git -C "$cache" rev-parse HEAD)"
+  git -C "$cache" switch -q -c support
+  mkdir -p "$cache/design/approved"
+  printf 'fixture-binary-placeholder\n' > "$cache/design/approved/bg.webp"
+  git -C "$cache" add design/approved/bg.webp
+  git -C "$cache" commit -q -m support
+  support_sha="$(git -C "$cache" rev-parse HEAD)"
+  git -C "$cache" switch -q --detach "$base_sha"
+
+  REPO="example/demo"; ISSUE="12"; BRANCH="feature/demo"; REVIEW_TARGET_SHA="$base_sha"
+  EXECUTION_BASE_SHA="$base_sha"; PRODUCT_SHA="$base_sha"; SUPPORT_COMMITS="$support_sha"
+  SUPPORT_PATHS="design/approved/bg.webp"; REPAIR_ROUND="1"; CURRENT_WORKTREE=""; RUN_ID=""; LAST_PHASE="fixture"; WORKFLOW_STATE="repair-approved"
+  PREPARED_WORKTREE=""
+  save_state
+  prepare_repair_worktree "$cache"
+  [ -n "$PREPARED_WORKTREE" ] || die "SELF_TEST_WORKTREE" "managed worktree missing" 52
+  [ "$EXECUTION_BASE_SHA" != "$REVIEW_TARGET_SHA" ] || die "SELF_TEST_SUPPORT" "support commit did not advance execution base" 53
+  [ -f "$PREPARED_WORKTREE/design/approved/bg.webp" ] || die "SELF_TEST_SUPPORT" "support asset missing from managed worktree" 54
+  cleanup_worktree "$cache" "$PREPARED_WORKTREE"
+  printf 'PASS reviewed-sha-plus-approved-support\n'
+
+  if grep -Fq 'wt="$(prepare_repair_worktree' "$0"; then
+    die "SELF_TEST_SUBSHELL_STATE" "prepare_repair_worktree must not run in command substitution" 55
+  fi
+  if grep -Fq 'verdict="$(run_review' "$0"; then
+    die "SELF_TEST_SUBSHELL_STATE" "run_review must not run in command substitution" 56
+  fi
+  printf 'PASS no-stateful-command-substitution\n'
+
   rm -rf "$tmp"
   STATE_DIR="$old_state"; DATA_DIR="$old_data"; LOG_DIR="$old_log"
 }
