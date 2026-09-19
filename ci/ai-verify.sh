@@ -53,4 +53,8 @@ grep -q "REVIEW_ERROR" docs/REVIEW_PROTOCOL.md
 grep -q "Maximum formal product repair rounds: 2" docs/REPAIR_PROTOCOL.md
 grep -q "explicit user approval" skills/release-gate/SKILL.md
 
+if [[ -f tests/control-bridge-fixture.sh ]]; then
+  bash tests/control-bridge-fixture.sh
+fi
+
 echo "Framework contract verification: PASS"
