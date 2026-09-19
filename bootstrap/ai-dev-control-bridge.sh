@@ -83,6 +83,18 @@ fetch_repo_commit() {
 
 do_ping() { echo "bridge-ok"; }
 
+do_disable_legacy_runner() {
+  local legacy_label="com.meshthings.life-balance-codex-runner"
+  if launchctl print "gui/$UID/$legacy_label" >/dev/null 2>&1; then
+    launchctl bootout "gui/$UID/$legacy_label" >/dev/null 2>&1 || return 12
+  fi
+  if launchctl print "gui/$UID/$legacy_label" >/dev/null 2>&1; then
+    echo "legacy-runner-still-loaded"
+    return 13
+  fi
+  echo "legacy-runner-disabled"
+}
+
 do_doctor() {
   [ -x "$ACTIVE_AI_DEV" ] || { echo "ai-dev-not-installed"; return 4; }
   "$ACTIVE_AI_DEV" doctor 2>&1 | tail -n 40
@@ -177,6 +189,9 @@ main_once() {
       ;;
     AI_DEV_RECOVER_REVIEW)
       output="$("$ACTIVE_AI_DEV" recover-review --repo "$target_repo" --issue "$target_issue" 2>&1)" || rc=$?
+      ;;
+    DISABLE_LEGACY_LIFE_BALANCE_RUNNER)
+      output="$(do_disable_legacy_runner 2>&1)" || rc=$?
       ;;
     *) output="unsupported-action:$action"; rc=9 ;;
   esac
