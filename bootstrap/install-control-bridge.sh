@@ -10,6 +10,7 @@ STATE_DIR="$HOME/.local/state/ai-dev-control-bridge"
 LOG_DIR="$HOME/Library/Logs/ai-dev-control-bridge"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 BRIDGE="$LIB_DIR/bridge.sh"
+WORKER="$LIB_DIR/worker.sh"
 CONFIG="$LIB_DIR/config.env"
 
 find_cmd() {
@@ -42,6 +43,11 @@ TMP="$BRIDGE.tmp.$$"
   | base64 -D > "$TMP"
 chmod 700 "$TMP"
 mv "$TMP" "$BRIDGE"
+
+TMP_WORKER="$WORKER.tmp.$"
+"$GH_BIN" api "repos/$REPO/contents/bootstrap/ai-dev-control-worker.sh?ref=$BOOTSTRAP_REF" --jq .content   | tr -d '\n'   | base64 -D > "$TMP_WORKER"
+chmod 700 "$TMP_WORKER"
+mv "$TMP_WORKER" "$WORKER"
 
 cat > "$CONFIG" <<EOF
 REPO="$REPO"
