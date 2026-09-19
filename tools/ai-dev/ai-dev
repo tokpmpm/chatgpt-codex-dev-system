@@ -1,0 +1,585 @@
+#!/bin/bash
+set -euo pipefail
+
+AI_DEV_VERSION="0.1.0"
+STATE_DIR="${AI_DEV_STATE_DIR:-$HOME/.local/state/ai-dev}"
+DATA_DIR="${AI_DEV_DATA_DIR:-$HOME/.local/share/ai-dev}"
+LOG_DIR="${AI_DEV_LOG_DIR:-$HOME/Library/Logs/ai-dev}"
+CONFIG_DIR="${AI_DEV_CONFIG_DIR:-$HOME/.config/ai-dev}"
+mkdir -p "$STATE_DIR/tasks" "$STATE_DIR/leases" "$STATE_DIR/locks" "$DATA_DIR/repos" "$DATA_DIR/worktrees" "$LOG_DIR" "$CONFIG_DIR"
+
+die() { printf 'ERROR[%s] %s\n' "$1" "$2" >&2; exit "${3:-1}"; }
+info() { printf '%s\n' "$*"; }
+slug() { printf '%s' "$1" | tr '/: .' '____'; }
+now() { date '+%Y-%m-%dT%H:%M:%S%z'; }
+shortsha() { printf '%s' "$1" | cut -c1-8; }
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "MISSING_DEPENDENCY" "$1 not found" 2
+}
+
+state_file() {
+  printf '%s/tasks/%s--%s.env' "$STATE_DIR" "$(slug "$1")" "$2"
+}
+
+lease_file() {
+  printf '%s/leases/%s--%s.lease' "$STATE_DIR" "$(slug "$1")" "$(slug "$2")"
+}
+
+save_state() {
+  local file tmp
+  file="$(state_file "$REPO" "$ISSUE")"
+  tmp="$file.tmp.$$"
+  {
+    printf 'REPO=%q\n' "$REPO"
+    printf 'ISSUE=%q\n' "$ISSUE"
+    printf 'BRANCH=%q\n' "$BRANCH"
+    printf 'WORKFLOW_STATE=%q\n' "$WORKFLOW_STATE"
+    printf 'REVIEW_TARGET_SHA=%q\n' "$REVIEW_TARGET_SHA"
+    printf 'EXECUTION_BASE_SHA=%q\n' "$EXECUTION_BASE_SHA"
+    printf 'PRODUCT_SHA=%q\n' "$PRODUCT_SHA"
+    printf 'SUPPORT_COMMITS=%q\n' "$SUPPORT_COMMITS"
+    printf 'SUPPORT_PATHS=%q\n' "$SUPPORT_PATHS"
+    printf 'REPAIR_ROUND=%q\n' "$REPAIR_ROUND"
+    printf 'CURRENT_WORKTREE=%q\n' "$CURRENT_WORKTREE"
+    printf 'RUN_ID=%q\n' "$RUN_ID"
+    printf 'LAST_PHASE=%q\n' "$LAST_PHASE"
+    printf 'UPDATED_AT=%q\n' "$(now)"
+  } > "$tmp"
+  mv "$tmp" "$file"
+}
+
+load_state() {
+  local file
+  file="$(state_file "$1" "$2")"
+  [ -f "$file" ] || die "STATE_NOT_FOUND" "No ai-dev state for $1 issue #$2" 3
+  # shellcheck disable=SC1090
+  . "$file"
+}
+
+acquire_branch_lease() {
+  local file current
+  file="$(lease_file "$REPO" "$BRANCH")"
+  if [ -f "$file" ]; then
+    current="$(cat "$file")"
+    [ "$current" = "$ISSUE" ] || die "BRANCH_LEASE_CONFLICT" "branch=$BRANCH active_issue=$current requested_issue=$ISSUE" 4
+  else
+    printf '%s\n' "$ISSUE" > "$file"
+  fi
+}
+
+release_branch_lease() {
+  local file
+  file="$(lease_file "$REPO" "$BRANCH")"
+  [ -f "$file" ] || return 0
+  [ "$(cat "$file")" = "$ISSUE" ] && rm -f "$file"
+}
+
+repo_cache() {
+  printf '%s/repos/%s' "$DATA_DIR" "$(slug "$1")"
+}
+
+ensure_repo_cache() {
+  need git
+  need gh
+  local cache
+  cache="$(repo_cache "$REPO")"
+  if [ ! -d "$cache/.git" ]; then
+    rm -rf "$cache"
+    gh repo clone "$REPO" "$cache" >/dev/null
+  fi
+  git -C "$cache" fetch --prune origin >/dev/null
+  printf '%s' "$cache"
+}
+
+remote_branch_head() {
+  local cache="$1"
+  git -C "$cache" rev-parse "refs/remotes/origin/$BRANCH" 2>/dev/null || true
+}
+
+guard_remote_head() {
+  local cache="$1" actual
+  actual="$(remote_branch_head "$cache")"
+  [ -n "$actual" ] || die "REMOTE_BRANCH_MISSING" "branch=$BRANCH" 5
+  if [ "$actual" != "$REVIEW_TARGET_SHA" ]; then
+    die "HEAD_DRIFT_UNKNOWN" "expected_review_target=$REVIEW_TARGET_SHA actual_remote_head=$actual branch=$BRANCH self_recover=no" 6
+  fi
+}
+
+new_run_id() {
+  printf 'issue-%s-r%s-%s-%s' "$ISSUE" "$REPAIR_ROUND" "$(date '+%Y%m%d%H%M%S')" "$(shortsha "$REVIEW_TARGET_SHA")"
+}
+
+cleanup_worktree() {
+  local cache="$1" wt="$2"
+  [ -n "$wt" ] || return 0
+  if [ -d "$wt" ]; then
+    git -C "$cache" worktree remove --force "$wt" >/dev/null 2>&1 || true
+  fi
+}
+
+prepare_repair_worktree() {
+  local cache="$1" wt support
+  RUN_ID="$(new_run_id)"
+  wt="$DATA_DIR/worktrees/$(slug "$REPO")/issue-$ISSUE/$RUN_ID"
+  mkdir -p "$(dirname "$wt")"
+  git -C "$cache" worktree add --detach "$wt" "$REVIEW_TARGET_SHA" >/dev/null
+  CURRENT_WORKTREE="$wt"
+  LAST_PHASE="worktree-created"
+  save_state
+
+  if [ -n "$SUPPORT_COMMITS" ]; then
+    IFS=',' read -r -a supports <<< "$SUPPORT_COMMITS"
+    for support in "${supports[@]}"; do
+      [ -n "$support" ] || continue
+      git -C "$cache" fetch origin "$support" >/dev/null 2>&1 || true
+      git -C "$wt" cherry-pick "$support" >/dev/null || {
+        git -C "$wt" cherry-pick --abort >/dev/null 2>&1 || true
+        die "SUPPORT_COMMIT_CONFLICT" "commit=$support target=$REVIEW_TARGET_SHA worktree=$wt" 7
+      }
+    done
+  fi
+
+  EXECUTION_BASE_SHA="$(git -C "$wt" rev-parse HEAD)"
+  LAST_PHASE="support-applied"
+  save_state
+  printf '%s' "$wt"
+}
+
+latest_approved_plan() {
+  gh issue view "$ISSUE" --repo "$REPO" --json comments --jq     '[.comments[].body | select(contains("REPAIR_PLAN_BEGIN") and contains("STATUS: APPROVED"))] | last // ""'
+}
+
+issue_text() {
+  gh issue view "$ISSUE" --repo "$REPO" --json title,body --jq '"TITLE: " + .title + "\n\n" + .body'
+}
+
+build_repair_prompt() {
+  local wt="$1" plan issue prompt
+  plan="$(latest_approved_plan)"
+  [ -n "$plan" ] || die "REPAIR_PLAN_MISSING" "No approved repair plan on $REPO#$ISSUE" 8
+  printf '%s' "$plan" | grep -Fq "TARGET_SHA: $REVIEW_TARGET_SHA" ||     die "REPAIR_PLAN_TARGET_MISMATCH" "plan does not target $REVIEW_TARGET_SHA" 9
+  issue="$(issue_text)"
+  prompt="$wt/.ai-dev-repair-prompt.txt"
+  {
+    printf 'You are the Developer for a guarded repair run.\n'
+    printf 'Work only in this repository worktree. Do not commit, push, merge, deploy, or change workflow infrastructure.\n'
+    printf 'Follow AGENTS.md and repository protocols. Preserve all DO_NOT_CHANGE constraints.\n'
+    printf 'The Runner will run regression, commit, push, CI, and independent review after you finish.\n\n'
+    printf 'Repository: %s\nIssue: #%s\nReviewed target SHA: %s\nRepair round: %s\n' "$REPO" "$ISSUE" "$REVIEW_TARGET_SHA" "$REPAIR_ROUND"
+    printf 'Approved support commits: %s\nApproved support paths: %s\n\n' "$SUPPORT_COMMITS" "$SUPPORT_PATHS"
+    printf 'ISSUE\n=====\n%s\n\n' "$issue"
+    printf 'APPROVED REPAIR PLAN\n====================\n%s\n\n' "$plan"
+    for f in AGENTS.md docs/PROJECT_STATE.md docs/PRODUCT_PRINCIPLES.md docs/AI_WORKFLOW.md docs/REVIEW_PROTOCOL.md docs/ONE_SHOT_DELIVERY_PROTOCOL.md; do
+      if [ -f "$wt/$f" ]; then
+        printf '\nFILE: %s\n----------------\n' "$f"
+        cat "$wt/$f"
+        printf '\n'
+      fi
+    done
+    printf '\nExecute the approved repair now. At the end, summarize changed files and validation you ran. Do not claim PASS for visual QA unless you generated and inspected the required artifact.\n'
+  } > "$prompt"
+  printf '%s' "$prompt"
+}
+
+codex_exec() {
+  local wt="$1" prompt_file="$2" mode="${3:-write}" help prompt
+  need codex
+  help="$(codex exec --help 2>&1 || true)"
+  prompt="$(cat "$prompt_file")"
+  local -a cmd
+  cmd=(codex exec)
+  if printf '%s' "$help" | grep -q -- '--skip-git-repo-check'; then
+    cmd+=(--skip-git-repo-check)
+  fi
+  if printf '%s' "$help" | grep -q -- '--sandbox'; then
+    if [ "$mode" = "read" ]; then
+      cmd+=(--sandbox read-only)
+    else
+      cmd+=(--sandbox workspace-write)
+    fi
+  elif [ "$mode" = "write" ] && printf '%s' "$help" | grep -q -- '--full-auto'; then
+    cmd+=(--full-auto)
+  fi
+  if printf '%s' "$help" | grep -q -- '--cd'; then
+    cmd+=(--cd "$wt")
+    "${cmd[@]}" "$prompt"
+  elif printf '%s' "$help" | grep -q -- '-C'; then
+    cmd+=(-C "$wt")
+    "${cmd[@]}" "$prompt"
+  else
+    (cd "$wt" && "${cmd[@]}" "$prompt")
+  fi
+}
+
+run_regression() {
+  local wt="$1"
+  if [ -f "$wt/package.json" ] && grep -q '"test:regression"' "$wt/package.json"; then
+    (cd "$wt" && npm run test:regression)
+  elif [ -f "$wt/package.json" ] && grep -q '"test"' "$wt/package.json"; then
+    (cd "$wt" && npm test)
+  else
+    info "No npm regression command detected; skipping generic regression."
+  fi
+}
+
+commit_candidate() {
+  local wt="$1" before="$2" after
+  after="$(git -C "$wt" rev-parse HEAD)"
+  [ "$after" = "$before" ] || die "CODEX_COMMITTED_UNEXPECTEDLY" "before=$before after=$after; Runner owns commits" 10
+  git -C "$wt" add -A
+  git -C "$wt" diff --cached --quiet && die "NO_PRODUCT_CHANGES" "Codex produced no changes" 11
+  git -C "$wt" -c user.name="AI Dev Runner" -c user.email="ai-dev@local"     commit -m "codex: #$ISSUE approved repair $REPAIR_ROUND" >/dev/null
+  PRODUCT_SHA="$(git -C "$wt" rev-parse HEAD)"
+  LAST_PHASE="candidate-committed"
+  save_state
+}
+
+push_candidate() {
+  local wt="$1"
+  git -C "$wt" push origin "HEAD:refs/heads/$BRANCH"
+  LAST_PHASE="candidate-pushed"
+  WORKFLOW_STATE="ci-running"
+  save_state
+}
+
+ci_state() {
+  local sha="$1"
+  gh api "repos/$REPO/actions/runs?head_sha=$sha&per_page=30" --jq     '[.workflow_runs[] | select(.head_sha=="'"$sha"'")] as $r | if ($r|length)==0 then "NONE" elif any($r[]; .status!="completed") then "RUNNING" elif any($r[]; (.conclusion!="success" and .conclusion!="skipped")) then "FAIL" else "PASS" end'
+}
+
+wait_ci() {
+  local sha="$1" deadline state stable=0
+  deadline=$(( $(date +%s) + 900 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    state="$(ci_state "$sha" 2>/dev/null || echo NONE)"
+    case "$state" in
+      PASS)
+        stable=$((stable+1))
+        if [ "$stable" -ge 2 ]; then
+          LAST_PHASE="ci-pass"
+          WORKFLOW_STATE="review-running"
+          save_state
+          return 0
+        fi
+        sleep 20
+        ;;
+      FAIL)
+        WORKFLOW_STATE="ci-failed"
+        LAST_PHASE="ci-failed"
+        save_state
+        die "CI_FAILED" "exact_sha=$sha" 12
+        ;;
+      *)
+        stable=0
+        sleep 15
+        ;;
+    esac
+  done
+  WORKFLOW_STATE="ci-timeout"
+  LAST_PHASE="ci-timeout"
+  save_state
+  die "CI_TIMEOUT" "exact_sha=$sha waited=900s" 13
+}
+
+build_review_prompt() {
+  local wt="$1" prompt="$wt/.ai-dev-review-prompt.txt" plan issue
+  plan="$(latest_approved_plan)"
+  issue="$(issue_text)"
+  {
+    printf 'You are an independent read-only reviewer in a fresh session. Do not modify files.\n'
+    printf 'Review the exact candidate SHA against the Issue, approved repair plan, and repository protocols.\n'
+    printf 'CI for the exact candidate SHA has passed. CI is evidence, not proof of product correctness or visual fidelity.\n\n'
+    printf 'Repository: %s\nIssue: #%s\nPrevious reviewed SHA: %s\nCandidate SHA: %s\nRepair round: %s\n\n' "$REPO" "$ISSUE" "$REVIEW_TARGET_SHA" "$PRODUCT_SHA" "$REPAIR_ROUND"
+    printf 'ISSUE\n=====\n%s\n\n' "$issue"
+    printf 'APPROVED REPAIR PLAN\n====================\n%s\n\n' "$plan"
+    printf 'Inspect git diff %s..%s, changed files, tests, and any review artifacts.\n' "$REVIEW_TARGET_SHA" "$PRODUCT_SHA"
+    printf 'For visual requirements, require actual rendered evidence; do not infer visual PASS from source or CI alone.\n\n'
+    printf 'Return exactly this format:\nVERDICT: APPROVE|REQUEST_CHANGES|REVIEW_ERROR\nBLOCKERS:\n- <none or concrete blocker>\nNOTES:\n- <concise evidence>\n'
+  } > "$prompt"
+  printf '%s' "$prompt"
+}
+
+run_review() {
+  local cache="$1" review_wt prompt output verdict
+  review_wt="$DATA_DIR/worktrees/$(slug "$REPO")/issue-$ISSUE/review-$(shortsha "$PRODUCT_SHA")-$(date '+%H%M%S')"
+  mkdir -p "$(dirname "$review_wt")"
+  git -C "$cache" fetch origin "$PRODUCT_SHA" >/dev/null 2>&1 || true
+  git -C "$cache" worktree add --detach "$review_wt" "$PRODUCT_SHA" >/dev/null
+  prompt="$(build_review_prompt "$review_wt")"
+  set +e
+  output="$(codex_exec "$review_wt" "$prompt" read 2>&1)"
+  local rc=$?
+  set -e
+  printf '%s\n' "$output" > "$LOG_DIR/review-$ISSUE-$(shortsha "$PRODUCT_SHA").log"
+  if [ "$rc" -ne 0 ]; then
+    verdict="REVIEW_ERROR"
+  else
+    verdict="$(printf '%s\n' "$output" | sed -n 's/^VERDICT:[[:space:]]*//p' | tail -1)"
+  fi
+  case "$verdict" in
+    APPROVE)
+      WORKFLOW_STATE="review-approved"
+      LAST_PHASE="review-approved"
+      ;;
+    REQUEST_CHANGES)
+      WORKFLOW_STATE="repair-awaiting-plan"
+      LAST_PHASE="review-changes"
+      ;;
+    *)
+      WORKFLOW_STATE="review-error"
+      LAST_PHASE="review-error"
+      verdict="REVIEW_ERROR"
+      ;;
+  esac
+  save_state
+  gh issue comment "$ISSUE" --repo "$REPO" --body "AI_DEV_REVIEW_RESULT
+CANDIDATE_SHA: $PRODUCT_SHA
+REPAIR_ROUND: $REPAIR_ROUND
+VERDICT: $verdict
+
+```
+$(printf '%s' "$output" | tail -c 5000)
+```" >/dev/null 2>&1 || true
+  cleanup_worktree "$cache" "$review_wt"
+  printf '%s' "$verdict"
+}
+
+cmd_doctor() {
+  local repair="false"
+  [ "${1:-}" = "--repair" ] && repair="true"
+  local bad=0
+  for c in git gh codex; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf 'PASS %-14s %s\n' "$c" "$(command -v "$c")"
+    else
+      printf 'FAIL %-14s missing\n' "$c"
+      bad=1
+    fi
+  done
+  if gh auth status >/dev/null 2>&1; then
+    printf 'PASS gh-auth        authenticated\n'
+  else
+    printf 'FAIL gh-auth        not authenticated\n'
+    bad=1
+  fi
+  printf 'PASS state-dir      %s\n' "$STATE_DIR"
+  printf 'PASS data-dir       %s\n' "$DATA_DIR"
+  if launchctl print "gui/$UID/com.meshthings.ai-dev-control-bridge" >/dev/null 2>&1; then
+    printf 'PASS control-bridge loaded\n'
+  else
+    printf 'WARN control-bridge not loaded\n'
+    if [ "$repair" = "true" ] && [ -f "$HOME/Library/LaunchAgents/com.meshthings.ai-dev-control-bridge.plist" ]; then
+      launchctl bootstrap "gui/$UID" "$HOME/Library/LaunchAgents/com.meshthings.ai-dev-control-bridge.plist" >/dev/null 2>&1 || true
+      launchctl kickstart -k "gui/$UID/com.meshthings.ai-dev-control-bridge" >/dev/null 2>&1 || true
+      printf 'REPAIR control-bridge restart attempted\n'
+    fi
+  fi
+  [ "$bad" -eq 0 ] || return 1
+}
+
+cmd_status() {
+  local repo="" issue=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="$2"; shift 2 ;;
+      --issue) issue="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ -n "$repo" ] && [ -n "$issue" ]; then
+    load_state "$repo" "$issue"
+    cat "$(state_file "$repo" "$issue")"
+  else
+    find "$STATE_DIR/tasks" -type f -name '*.env' -maxdepth 1 -print 2>/dev/null || true
+  fi
+}
+
+cmd_import_repair() {
+  local repo="" issue="" branch="" review="" support="" paths="" round="1"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="$2"; shift 2 ;;
+      --issue) issue="$2"; shift 2 ;;
+      --branch) branch="$2"; shift 2 ;;
+      --review-sha) review="$2"; shift 2 ;;
+      --support-commit) support="$2"; shift 2 ;;
+      --support-path) paths="$2"; shift 2 ;;
+      --round) round="$2"; shift 2 ;;
+      *) die "INVALID_ARGUMENT" "unknown import-repair argument: $1" 20 ;;
+    esac
+  done
+  [ -n "$repo" ] && [ -n "$issue" ] && [ -n "$branch" ] && [ -n "$review" ] ||     die "INVALID_ARGUMENT" "import-repair requires --repo --issue --branch --review-sha" 20
+  REPO="$repo"; ISSUE="$issue"; BRANCH="$branch"; REVIEW_TARGET_SHA="$review"
+  EXECUTION_BASE_SHA="$review"; PRODUCT_SHA="$review"; SUPPORT_COMMITS="$support"; SUPPORT_PATHS="$paths"
+  REPAIR_ROUND="$round"; CURRENT_WORKTREE=""; RUN_ID=""; LAST_PHASE="imported"; WORKFLOW_STATE="repair-approved"
+  acquire_branch_lease
+  save_state
+  info "IMPORTED $REPO#$ISSUE target=$REVIEW_TARGET_SHA support=$SUPPORT_COMMITS"
+}
+
+cmd_support_add() {
+  local repo="" issue="" commit="" path=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="$2"; shift 2 ;;
+      --issue) issue="$2"; shift 2 ;;
+      --commit) commit="$2"; shift 2 ;;
+      --path) path="$2"; shift 2 ;;
+      *) die "INVALID_ARGUMENT" "unknown support argument: $1" 21 ;;
+    esac
+  done
+  load_state "$repo" "$issue"
+  local cache
+  cache="$(ensure_repo_cache)"
+  git -C "$cache" fetch origin "$commit" >/dev/null 2>&1 || die "SUPPORT_COMMIT_NOT_FOUND" "$commit" 22
+  git -C "$cache" cat-file -e "$commit^{commit}" || die "SUPPORT_COMMIT_NOT_FOUND" "$commit" 22
+  if [ -n "$path" ]; then
+    git -C "$cache" show --pretty='' --name-only "$commit" | grep -Fxq "$path" ||       die "SUPPORT_PATH_NOT_IN_COMMIT" "commit=$commit path=$path" 23
+  fi
+  if [ -z "$SUPPORT_COMMITS" ]; then SUPPORT_COMMITS="$commit"; else SUPPORT_COMMITS="$SUPPORT_COMMITS,$commit"; fi
+  if [ -n "$path" ]; then
+    if [ -z "$SUPPORT_PATHS" ]; then SUPPORT_PATHS="$path"; else SUPPORT_PATHS="$SUPPORT_PATHS,$path"; fi
+  fi
+  LAST_PHASE="support-added"
+  save_state
+  info "SUPPORT_ADDED commit=$commit path=$path"
+}
+
+cmd_repair() {
+  local repo="" issue="" dry="false"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="$2"; shift 2 ;;
+      --issue) issue="$2"; shift 2 ;;
+      --dry-run) dry="true"; shift ;;
+      *) die "INVALID_ARGUMENT" "unknown repair argument: $1" 30 ;;
+    esac
+  done
+  load_state "$repo" "$issue"
+  acquire_branch_lease
+  [ "$WORKFLOW_STATE" = "repair-approved" ] || die "INVALID_STATE" "state=$WORKFLOW_STATE expected=repair-approved" 31
+  local cache wt before
+  cache="$(ensure_repo_cache)"
+  guard_remote_head "$cache"
+  wt="$(prepare_repair_worktree "$cache")"
+  before="$(git -C "$wt" rev-parse HEAD)"
+  local prompt
+  prompt="$(build_repair_prompt "$wt")"
+  if [ "$dry" = "true" ]; then
+    LAST_PHASE="dry-run-pass"
+    WORKFLOW_STATE="repair-approved"
+    save_state
+    info "DRY_RUN_PASS worktree=$wt execution_base=$EXECUTION_BASE_SHA"
+    cleanup_worktree "$cache" "$wt"
+    CURRENT_WORKTREE=""
+    save_state
+    return 0
+  fi
+
+  WORKFLOW_STATE="codex-running"
+  LAST_PHASE="codex-running"
+  save_state
+  codex_exec "$wt" "$prompt" write | tee "$LOG_DIR/codex-$ISSUE-$RUN_ID.log"
+  LAST_PHASE="codex-finished"
+  save_state
+
+  run_regression "$wt" | tee "$LOG_DIR/regression-$ISSUE-$RUN_ID.log"
+  LAST_PHASE="regression-pass"
+  save_state
+
+  commit_candidate "$wt" "$before"
+  push_candidate "$wt"
+  git -C "$cache" fetch origin "$BRANCH" >/dev/null
+  wait_ci "$PRODUCT_SHA"
+  local verdict
+  verdict="$(run_review "$cache")"
+  cleanup_worktree "$cache" "$wt"
+  CURRENT_WORKTREE=""
+  save_state
+  info "REPAIR_COMPLETE candidate=$PRODUCT_SHA verdict=$verdict"
+}
+
+cmd_recover_review() {
+  local repo="" issue=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo) repo="$2"; shift 2 ;;
+      --issue) issue="$2"; shift 2 ;;
+      *) die "INVALID_ARGUMENT" "unknown recover-review argument: $1" 40 ;;
+    esac
+  done
+  load_state "$repo" "$issue"
+  [ "$WORKFLOW_STATE" = "review-error" ] || die "INVALID_STATE" "state=$WORKFLOW_STATE expected=review-error" 41
+  local cache head verdict
+  cache="$(ensure_repo_cache)"
+  head="$(remote_branch_head "$cache")"
+  [ "$head" = "$PRODUCT_SHA" ] || die "RECOVERY_SHA_MISMATCH" "expected=$PRODUCT_SHA actual=$head" 42
+  [ "$(ci_state "$PRODUCT_SHA")" = "PASS" ] || die "RECOVERY_CI_NOT_PASS" "sha=$PRODUCT_SHA" 43
+  WORKFLOW_STATE="review-running"; LAST_PHASE="review-recovery"; save_state
+  verdict="$(run_review "$cache")"
+  info "REVIEW_RECOVERY_COMPLETE verdict=$verdict"
+}
+
+cmd_self_test() {
+  local root old_state old_data old_log tmp
+  tmp="$(mktemp -d)"
+  old_state="$STATE_DIR"; old_data="$DATA_DIR"; old_log="$LOG_DIR"
+  STATE_DIR="$tmp/state"; DATA_DIR="$tmp/data"; LOG_DIR="$tmp/log"
+  mkdir -p "$STATE_DIR/tasks" "$STATE_DIR/leases" "$STATE_DIR/locks" "$DATA_DIR/repos" "$DATA_DIR/worktrees" "$LOG_DIR"
+
+  REPO="example/demo"; ISSUE="12"; BRANCH="feature/demo"; REVIEW_TARGET_SHA="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  EXECUTION_BASE_SHA="$REVIEW_TARGET_SHA"; PRODUCT_SHA="$REVIEW_TARGET_SHA"; SUPPORT_COMMITS="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  SUPPORT_PATHS="design/approved/bg.webp"; REPAIR_ROUND="1"; CURRENT_WORKTREE=""; RUN_ID=""; LAST_PHASE="fixture"; WORKFLOW_STATE="repair-approved"
+  acquire_branch_lease
+  save_state
+  unset REPO ISSUE BRANCH REVIEW_TARGET_SHA EXECUTION_BASE_SHA PRODUCT_SHA SUPPORT_COMMITS SUPPORT_PATHS REPAIR_ROUND CURRENT_WORKTREE RUN_ID LAST_PHASE WORKFLOW_STATE
+  load_state "example/demo" "12"
+  [ "$REVIEW_TARGET_SHA" = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ] || die "SELF_TEST_LEDGER" "review target changed" 50
+  [ "$SUPPORT_COMMITS" = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ] || die "SELF_TEST_LEDGER" "support commit lost" 50
+
+  local lease
+  lease="$(lease_file "$REPO" "$BRANCH")"
+  [ "$(cat "$lease")" = "12" ] || die "SELF_TEST_LEASE" "lease missing" 51
+
+  printf 'PASS ledger-atomic\n'
+  printf 'PASS review-target-separate-from-support\n'
+  printf 'PASS branch-lease\n'
+  printf 'PASS named-guard-contract\n'
+  rm -rf "$tmp"
+  STATE_DIR="$old_state"; DATA_DIR="$old_data"; LOG_DIR="$old_log"
+}
+
+usage() {
+  cat <<'EOF'
+ai-dev 0.1
+Commands:
+  ai-dev doctor [--repair]
+  ai-dev status [--repo OWNER/REPO --issue N]
+  ai-dev import-repair --repo OWNER/REPO --issue N --branch BRANCH --review-sha SHA [--support-commit SHA] [--support-path PATH] [--round N]
+  ai-dev support add --repo OWNER/REPO --issue N --commit SHA [--path PATH]
+  ai-dev repair --repo OWNER/REPO --issue N [--dry-run]
+  ai-dev recover-review --repo OWNER/REPO --issue N
+  ai-dev self-test
+  ai-dev version
+EOF
+}
+
+cmd="${1:-}"
+[ -n "$cmd" ] || { usage; exit 0; }
+shift || true
+case "$cmd" in
+  doctor) cmd_doctor "$@" ;;
+  status) cmd_status "$@" ;;
+  import-repair) cmd_import_repair "$@" ;;
+  support)
+    sub="${1:-}"; shift || true
+    [ "$sub" = "add" ] || die "INVALID_ARGUMENT" "support requires add" 60
+    cmd_support_add "$@"
+    ;;
+  repair) cmd_repair "$@" ;;
+  recover-review) cmd_recover_review "$@" ;;
+  self-test) cmd_self_test ;;
+  version) printf 'ai-dev %s\n' "$AI_DEV_VERSION" ;;
+  *) usage; die "INVALID_COMMAND" "$cmd" 61 ;;
+esac
