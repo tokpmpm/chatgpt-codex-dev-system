@@ -116,6 +116,83 @@ do_disable_legacy_runner() {
   echo "legacy-runner-disabled"
 }
 
+do_legacy_inspect() {
+  local runner="$HOME/.local/lib/life-balance-codex-runner/runner.sh"
+  local plist="$HOME/Library/LaunchAgents/com.meshthings.life-balance-codex-runner.plist"
+  local config="$HOME/.config/life-balance-codex-runner/config.env"
+  printf 'runner_exists=%s ' "$([ -f "$runner" ] && echo yes || echo no)"
+  if [ -f "$runner" ]; then
+    printf 'runner_sha256=%s ' "$(shasum -a 256 "$runner" | awk '{print $1}')"
+  fi
+  printf 'plist_exists=%s ' "$([ -f "$plist" ] && echo yes || echo no)"
+  printf 'config_exists=%s ' "$([ -f "$config" ] && echo yes || echo no)"
+  printf 'loaded=%s ' "$(launchctl print "gui/$UID/com.meshthings.life-balance-codex-runner" >/dev/null 2>&1 && echo yes || echo no)"
+  if [ -f "$config" ]; then
+    printf 'config_keys='
+    grep -E '^[A-Z0-9_]+=' "$config" | sed -E 's/=.*$/=<set>/' | tr '\n' ',' | head -c 1200
+  fi
+}
+
+kill_tree() {
+  local pid="$1" child
+  [ -n "$pid" ] || return 0
+  for child in $(/usr/bin/pgrep -P "$pid" 2>/dev/null || true); do
+    kill_tree "$child"
+  done
+  kill -TERM "$pid" >/dev/null 2>&1 || true
+}
+
+do_snapshot_stop_active() {
+  local target_repo="$1" target_issue="$2"
+  local worker_pid="" state_file worktree recovery_branch snapshot_sha dirty
+  if [ -f "$ACTIVE_WORKER" ]; then
+    worker_pid="$(sed -n 's/^PID=//p' "$ACTIVE_WORKER" | head -1)"
+  fi
+  if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
+    kill_tree "$worker_pid"
+    sleep 3
+    if kill -0 "$worker_pid" 2>/dev/null; then
+      kill -KILL "$worker_pid" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  state_file="$HOME/.local/state/ai-dev/tasks/$(printf '%s' "$target_repo" | tr '/: .' '____')--$target_issue.env"
+  [ -f "$state_file" ] || { echo "state-file-missing:$state_file"; return 18; }
+  . "$state_file"
+  worktree="${CURRENT_WORKTREE:-}"
+  [ -n "$worktree" ] && [ -d "$worktree" ] || { echo "worktree-missing:$worktree"; return 19; }
+
+  recovery_branch="recovery/issue-${target_issue}-new-runner-wip-$(date '+%Y%m%d-%H%M%S')"
+  git -C "$worktree" checkout -b "$recovery_branch" >/dev/null 2>&1 || return 20
+  dirty="$(git -C "$worktree" status --porcelain)"
+  if [ -n "$dirty" ]; then
+    git -C "$worktree" add -A
+    git -C "$worktree" -c user.name="AI Dev Rollback" -c user.email="ai-dev@local" \
+      commit -m "wip: preserve issue #$target_issue before runner rollback" >/dev/null || return 21
+  fi
+  snapshot_sha="$(git -C "$worktree" rev-parse HEAD)"
+  git -C "$worktree" push origin "HEAD:refs/heads/$recovery_branch" >/dev/null || return 22
+  rm -f "$ACTIVE_WORKER"
+  echo "snapshot_saved branch=$recovery_branch sha=$snapshot_sha worktree=$worktree"
+}
+
+do_restore_legacy_runner() {
+  local runner="$HOME/.local/lib/life-balance-codex-runner/runner.sh"
+  local plist="$HOME/Library/LaunchAgents/com.meshthings.life-balance-codex-runner.plist"
+  local legacy_label="com.meshthings.life-balance-codex-runner"
+  [ -f "$runner" ] || { echo "legacy-runner-missing"; return 23; }
+  [ -f "$plist" ] || { echo "legacy-plist-missing"; return 24; }
+
+  launchctl bootout "gui/$UID/$legacy_label" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$UID" "$plist" >/dev/null 2>&1 || return 25
+  launchctl kickstart -k "gui/$UID/$legacy_label" >/dev/null 2>&1 || return 26
+  launchctl print "gui/$UID/$legacy_label" >/dev/null 2>&1 || return 27
+
+  nohup /bin/sh -c "sleep 5; /bin/launchctl bootout gui/$UID/com.meshthings.ai-dev-control-bridge" \
+    > "$LOG_DIR/rollback-shutdown.log" 2>&1 &
+  echo "legacy-runner-restored; new-control-bridge-shutdown-scheduled"
+}
+
 do_doctor() {
   [ -x "$ACTIVE_AI_DEV" ] || { echo "ai-dev-not-installed"; return 4; }
   "$ACTIVE_AI_DEV" doctor 2>&1 | tail -n 40
@@ -216,6 +293,15 @@ main_once() {
       ;;
     DISABLE_LEGACY_LIFE_BALANCE_RUNNER)
       output="$(do_disable_legacy_runner 2>&1)" || rc=$?
+      ;;
+    LEGACY_INSPECT)
+      output="$(do_legacy_inspect 2>&1)" || rc=$?
+      ;;
+    SNAPSHOT_STOP_ACTIVE)
+      output="$(do_snapshot_stop_active "$target_repo" "$target_issue" 2>&1)" || rc=$?
+      ;;
+    RESTORE_LEGACY_RUNNER)
+      output="$(do_restore_legacy_runner 2>&1)" || rc=$?
       ;;
     *) output="unsupported-action:$action"; rc=9 ;;
   esac
