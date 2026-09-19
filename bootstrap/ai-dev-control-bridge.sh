@@ -118,7 +118,7 @@ do_sync_install() {
 main_once() {
   "$GH_BIN" auth status >/dev/null 2>&1 || { log "gh auth unavailable"; return 0; }
 
-  local body command_id action commit
+  local body command_id action commit target_repo target_issue target_branch review_sha support_commit support_path repair_round
   body="$("$GH_BIN" api "repos/$REPO/issues/$INBOX_ISSUE" --jq .body 2>/dev/null)" || {
     log "failed to fetch inbox"
     return 0
@@ -129,6 +129,13 @@ main_once() {
   command_id="$(printf '%s\n' "$body" | sed -n 's/^COMMAND_ID:[[:space:]]*//p' | head -1)"
   action="$(printf '%s\n' "$body" | sed -n 's/^ACTION:[[:space:]]*//p' | head -1)"
   commit="$(printf '%s\n' "$body" | sed -n 's/^COMMIT:[[:space:]]*//p' | head -1)"
+  target_repo="$(printf '%s\n' "$body" | sed -n 's/^TARGET_REPO:[[:space:]]*//p' | head -1)"
+  target_issue="$(printf '%s\n' "$body" | sed -n 's/^TARGET_ISSUE:[[:space:]]*//p' | head -1)"
+  target_branch="$(printf '%s\n' "$body" | sed -n 's/^TARGET_BRANCH:[[:space:]]*//p' | head -1)"
+  review_sha="$(printf '%s\n' "$body" | sed -n 's/^REVIEW_SHA:[[:space:]]*//p' | head -1)"
+  support_commit="$(printf '%s\n' "$body" | sed -n 's/^SUPPORT_COMMIT:[[:space:]]*//p' | head -1)"
+  support_path="$(printf '%s\n' "$body" | sed -n 's/^SUPPORT_PATH:[[:space:]]*//p' | head -1)"
+  repair_round="$(printf '%s\n' "$body" | sed -n 's/^REPAIR_ROUND:[[:space:]]*//p' | head -1)"
 
   [ -n "$command_id" ] || return 0
   [ -n "$action" ] || return 0
@@ -143,6 +150,22 @@ main_once() {
     DOCTOR_REPAIR) output="$(do_doctor_repair 2>&1)" || rc=$? ;;
     BRIDGE_UPDATE) output="$(do_bridge_update "$commit" 2>&1)" || rc=$? ;;
     SYNC_INSTALL) output="$(do_sync_install "$commit" 2>&1)" || rc=$? ;;
+    AI_DEV_STATUS)
+      output="$("$ACTIVE_AI_DEV" status --repo "$target_repo" --issue "$target_issue" 2>&1)" || rc=$?
+      ;;
+    AI_DEV_IMPORT_REPAIR)
+      [ -n "$repair_round" ] || repair_round="1"
+      output="$("$ACTIVE_AI_DEV" import-repair --repo "$target_repo" --issue "$target_issue" --branch "$target_branch" --review-sha "$review_sha" --support-commit "$support_commit" --support-path "$support_path" --round "$repair_round" 2>&1)" || rc=$?
+      ;;
+    AI_DEV_REPAIR_DRY_RUN)
+      output="$("$ACTIVE_AI_DEV" repair --repo "$target_repo" --issue "$target_issue" --dry-run 2>&1)" || rc=$?
+      ;;
+    AI_DEV_REPAIR)
+      output="$("$ACTIVE_AI_DEV" repair --repo "$target_repo" --issue "$target_issue" 2>&1)" || rc=$?
+      ;;
+    AI_DEV_RECOVER_REVIEW)
+      output="$("$ACTIVE_AI_DEV" recover-review --repo "$target_repo" --issue "$target_issue" 2>&1)" || rc=$?
+      ;;
     *) output="unsupported-action:$action"; rc=9 ;;
   esac
 
