@@ -61,11 +61,14 @@ cat > "$PLIST" <<EOF
   <key>ProgramArguments</key>
   <array>
     <string>$BRIDGE</string>
+    <string>--daemon</string>
   </array>
-  <key>StartInterval</key>
-  <integer>60</integer>
   <key>RunAtLoad</key>
   <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
   <key>StandardOutPath</key>
   <string>$LOG_DIR/stdout.log</string>
   <key>StandardErrorPath</key>
@@ -81,7 +84,16 @@ rm -rf "$STATE_DIR/lock"
 launchctl bootstrap "gui/$UID" "$PLIST"
 launchctl kickstart -k "gui/$UID/$LABEL"
 
-"$BRIDGE" --once >/dev/null 2>&1 || true
+sleep 2
+if ! launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1; then
+  echo "ERROR: control bridge service failed to load"
+  exit 4
+fi
+
+if [ ! -f "$STATE_DIR/heartbeat" ]; then
+  echo "ERROR: control bridge heartbeat missing"
+  exit 5
+fi
 
 echo "AI Dev control bridge installed."
 echo "Inbox: https://github.com/$REPO/issues/$INBOX_ISSUE"
