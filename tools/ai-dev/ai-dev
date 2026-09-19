@@ -172,8 +172,8 @@ prepare_repair_worktree() {
 
   EXECUTION_BASE_SHA="$(git -C "$wt" rev-parse HEAD)"
   LAST_PHASE="support-applied"
+  PREPARED_WORKTREE="$wt"
   save_state
-  printf '%s' "$wt"
 }
 
 latest_approved_plan() {
@@ -190,7 +190,7 @@ build_repair_prompt() {
   [ -n "$plan" ] || die "REPAIR_PLAN_MISSING" "No approved repair plan on $REPO#$ISSUE" 8
   printf '%s' "$plan" | grep -Fq "TARGET_SHA: $REVIEW_TARGET_SHA" ||     die "REPAIR_PLAN_TARGET_MISMATCH" "plan does not target $REVIEW_TARGET_SHA" 9
   issue="$(issue_text)"
-  prompt="$wt/.ai-dev-repair-prompt.txt"
+  prompt="$LOG_DIR/repair-prompt-$ISSUE-$RUN_ID.txt"
   {
     printf 'You are the Developer for a guarded repair run.\n'
     printf 'Work only in this repository worktree. Do not commit, push, merge, deploy, or change workflow infrastructure.\n'
@@ -314,7 +314,7 @@ wait_ci() {
 }
 
 build_review_prompt() {
-  local wt="$1" prompt="$wt/.ai-dev-review-prompt.txt" plan issue
+  local wt="$1" prompt="$LOG_DIR/review-prompt-$ISSUE-$(shortsha "$PRODUCT_SHA").txt" plan issue
   plan="$(latest_approved_plan)"
   issue="$(issue_text)"
   {
@@ -373,7 +373,7 @@ VERDICT: $verdict
 $(printf '%s' "$output" | tail -c 5000)
 ```" >/dev/null 2>&1 || true
   cleanup_worktree "$cache" "$review_wt"
-  printf '%s' "$verdict"
+  REVIEW_VERDICT="$verdict"
 }
 
 cmd_doctor() {
@@ -463,6 +463,28 @@ cmd_import_repair() {
   EXECUTION_BASE_SHA="$review"; PRODUCT_SHA="$review"; SUPPORT_COMMITS="$support"; SUPPORT_PATHS="$paths"
   REPAIR_ROUND="$round"; CURRENT_WORKTREE=""; RUN_ID=""; LAST_PHASE="imported"; WORKFLOW_STATE="repair-approved"
   acquire_branch_lease
+
+  local cache actual
+  cache="$(ensure_repo_cache)"
+  actual="$(remote_branch_head "$cache")"
+  [ "$actual" = "$REVIEW_TARGET_SHA" ] || die "HEAD_DRIFT_UNKNOWN" "import expected_review_target=$REVIEW_TARGET_SHA actual_remote_head=$actual branch=$BRANCH" 24
+
+  if [ -n "$SUPPORT_COMMITS" ]; then
+    IFS=',' read -r -a import_supports <<< "$SUPPORT_COMMITS"
+    for import_support in "${import_supports[@]}"; do
+      [ -n "$import_support" ] || continue
+      git -C "$cache" fetch origin "$import_support" >/dev/null 2>&1 || die "SUPPORT_COMMIT_NOT_FOUND" "$import_support" 25
+      git -C "$cache" cat-file -e "$import_support^{commit}" || die "SUPPORT_COMMIT_NOT_FOUND" "$import_support" 25
+    done
+  fi
+  if [ -n "$SUPPORT_PATHS" ] && [ -n "$SUPPORT_COMMITS" ]; then
+    first_support="${SUPPORT_COMMITS%%,*}"
+    IFS=',' read -r -a import_paths <<< "$SUPPORT_PATHS"
+    for import_path in "${import_paths[@]}"; do
+      git -C "$cache" show --pretty='' --name-only "$first_support" | grep -Fxq "$import_path" ||         die "SUPPORT_PATH_NOT_IN_COMMIT" "commit=$first_support path=$import_path" 26
+    done
+  fi
+
   save_state
   info "IMPORTED $REPO#$ISSUE target=$REVIEW_TARGET_SHA support=$SUPPORT_COMMITS"
 }
@@ -511,7 +533,10 @@ cmd_repair() {
   local cache wt before
   cache="$(ensure_repo_cache)"
   guard_remote_head "$cache"
-  wt="$(prepare_repair_worktree "$cache")"
+  PREPARED_WORKTREE=""
+  prepare_repair_worktree "$cache"
+  wt="$PREPARED_WORKTREE"
+  [ -n "$wt" ] || die "WORKTREE_PREP_FAILED" "managed repair worktree path missing" 32
   before="$(git -C "$wt" rev-parse HEAD)"
   local prompt
   prompt="$(build_repair_prompt "$wt")"
@@ -542,7 +567,9 @@ cmd_repair() {
   git -C "$cache" fetch origin "$BRANCH" >/dev/null
   wait_ci "$PRODUCT_SHA"
   local verdict
-  verdict="$(run_review "$cache")"
+  REVIEW_VERDICT=""
+  run_review "$cache"
+  verdict="$REVIEW_VERDICT"
   cleanup_worktree "$cache" "$wt"
   CURRENT_WORKTREE=""
   save_state
@@ -566,7 +593,9 @@ cmd_recover_review() {
   [ "$head" = "$PRODUCT_SHA" ] || die "RECOVERY_SHA_MISMATCH" "expected=$PRODUCT_SHA actual=$head" 42
   [ "$(ci_state "$PRODUCT_SHA")" = "PASS" ] || die "RECOVERY_CI_NOT_PASS" "sha=$PRODUCT_SHA" 43
   WORKFLOW_STATE="review-running"; LAST_PHASE="review-recovery"; save_state
-  verdict="$(run_review "$cache")"
+  REVIEW_VERDICT=""
+  run_review "$cache"
+  verdict="$REVIEW_VERDICT"
   info "REVIEW_RECOVERY_COMPLETE verdict=$verdict"
 }
 
