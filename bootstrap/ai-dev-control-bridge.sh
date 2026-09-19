@@ -193,4 +193,34 @@ main_once() {
   fi
 }
 
-main_once
+
+heartbeat() {
+  printf 'pid=%s updated_at=%s\n' "$$" "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$STATE_DIR/heartbeat"
+}
+
+run_daemon() {
+  local loops=0 max_loops="${AI_DEV_DAEMON_MAX_LOOPS:-0}" interval="${AI_DEV_POLL_SECONDS:-30}"
+  while true; do
+    heartbeat
+    main_once
+    loops=$((loops + 1))
+    if [ "$max_loops" -gt 0 ] && [ "$loops" -ge "$max_loops" ]; then
+      return 0
+    fi
+    sleep "$interval"
+  done
+}
+
+case "${1:---once}" in
+  --once)
+    heartbeat
+    main_once
+    ;;
+  --daemon)
+    run_daemon
+    ;;
+  *)
+    echo "usage: $0 [--once|--daemon]" >&2
+    exit 2
+    ;;
+esac
