@@ -8,6 +8,7 @@ bash -n "$ROOT/bootstrap/install-control-bridge.sh"
 bash -n "$ROOT/bootstrap/ai-dev-control-bridge.sh"
 bash -n "$ROOT/bootstrap/install-ai-dev.sh"
 bash -n "$ROOT/bootstrap/repair-legacy-life-balance-runner.sh"
+bash -n "$ROOT/bootstrap/final-repair-legacy-life-balance-runner.sh"
 bash -n "$ROOT/tools/ai-dev/ai-dev"
 
 TMP="$(mktemp -d)"
